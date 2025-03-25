@@ -11,14 +11,14 @@ class DonutDetailer4:
             "required": {
                 "model": ("MODEL",),
                 # Multipliers for Input Block:
-                "Weight_in": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.001}),
-                "Bias_in":   ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.001}),
+                "Weight_in": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.001}),
+                "Bias_in":   ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.001}),
                 # Multipliers for Output Block 0:
-                "Weight_out0": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.001}),
-                "Bias_out0":   ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.001}),
+                "Weight_out0": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.001}),
+                "Bias_out0":   ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.001}),
                 # Multipliers for Output Block 2:
-                "Weight_out2": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.001}),
-                "Bias_out2":   ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.001}),
+                "Weight_out2": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.001}),
+                "Bias_out2":   ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.001}),
             }
         }
 
