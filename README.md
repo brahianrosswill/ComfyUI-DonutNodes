@@ -6,4 +6,4 @@ Donut Detailer 2: Mimicks closes Supermerger Adjust parameters.
 
 Donut Detailer 4: Making it more barebone, without the coefficients. 
 
-Thanks to epiTune for helping me make this, and ChatGPT. Note: epiTune does not think this is the best solution to adding more texture as it is a a crude way of modifying patching the model, use it sparingly.
+Thanks to epiTune for helping me make this, and ChatGPT. Note: epiTune does not think this is the best solution to adding more texture as it is a a crude way of modifying the model, use it sparingly.
