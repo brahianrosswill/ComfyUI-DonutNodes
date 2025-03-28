@@ -1,4 +1,4 @@
-This is an experimental node I made to mimick the "adjust" in A1111 Supermerger (https://github.com/hako-mikan/sd-webui-supermerger?tab=readme-ov-file#adjust). It adds more noise and texture to the output, and can also adjust gamma/brightness using the last parameter.
+This is an experimental node I made to mimick the "adjust" in A1111 Supermerger (https://github.com/hako-mikan/sd-webui-supermerger?tab=readme-ov-file#adjust). It adds more noise and texture to the output, and can also adjust gamma/brightness using the last parameter. The 3 variants are fundamentally doing the same thing, but with different parameter controls. Scale/multiplier multiplies the S1 (weight) and S2 (bias) parameters. 
 
 Donut Detailer: Initial try at making the node, dosent mimick supermerger accurately. 
 
