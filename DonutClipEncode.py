@@ -5,14 +5,14 @@ class DonutClipEncode:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
-            "width": ( "INT",    {"default": 1024.0, "min": 0,   "max": MAX_RESOLUTION}),
-            "height":("INT",    {"default": 1024.0, "min": 0,   "max": MAX_RESOLUTION}),
-            "clip":  ( "CLIP", ),
-            "text_g":("STRING", {"multiline": True, "dynamicPrompts": True}),
-            "text_l":("STRING", {"multiline": True, "dynamicPrompts": True}),
-            "mix":   ( "FLOAT",  {"default": 0.5,     "min": 0.0, "max": 1.0, "step": 0.01}),
-            "size_cond_factor":("INT", {"default": 4, "min": 1, "max": 16}),
-            "layer_idx":   ("INT",     {"default": -2,    "min": -33, "max": 33}),
+            "width": ("INT",    {"default": 1024.0, "min": 0,    "max": MAX_RESOLUTION}),
+            "height":("INT",    {"default": 1024.0, "min": 0,    "max": MAX_RESOLUTION}),
+            "clip":  ("CLIP", ),
+            "text_g":("STRING",{"multiline": True, "dynamicPrompts": True}),
+            "text_l":("STRING",{"multiline": True, "dynamicPrompts": True}),
+            "mix":   ("FLOAT",  {"default": 0.5,     "min": 0.0,  "max": 1.0,  "step": 0.01}),
+            "size_cond_factor":("INT",   {"default": 4,      "min": 1,    "max": 16}),
+            "layer_idx":   ("INT",     {"default": -2,     "min": -33,  "max": 33}),
         }}
 
     RETURN_TYPES = ("CONDITIONING",)
@@ -20,12 +20,12 @@ class DonutClipEncode:
     CATEGORY     = "essentials"
 
     def execute(self, clip, width, height, size_cond_factor,
-                      text_g, text_l, mix, layer_idx):
+                text_g, text_l, mix, layer_idx):
         # 1) upscale
         width  *= size_cond_factor
         height *= size_cond_factor
 
-        # 2) clone & set layer stop
+        # 2) clone & set stopping layer
         clip = clip.clone()
         clip.clip_layer(layer_idx)
 
@@ -35,19 +35,18 @@ class DonutClipEncode:
         empty    = clip.tokenize("")
         empty_g, empty_l = empty["g"], empty["l"]
 
-        # 4) if exactly default mix, do the standard single-pass encode
+        # 4) default case: exact mid mix uses single-pass encode
         if abs(mix - 0.5) < 1e-6:
             tokens = {"g": tokens_g["g"], "l": tokens_l["l"]}
             cond_combined, pooled_combined = clip.encode_from_tokens(tokens, return_pooled=True)
         else:
-            # --- custom split & mix path ---
-            # encode g-only and l-only
+            # split encodings for mix != 0.5
             cond_g, pooled_g = clip.encode_from_tokens(
                 {"g": tokens_g["g"], "l": empty_l}, return_pooled=True)
             cond_l, pooled_l = clip.encode_from_tokens(
                 {"g": empty_g,       "l": tokens_l["l"]}, return_pooled=True)
 
-            # mix weights so they sum to 2
+            # mix weights sum to 2 to preserve CFG magnitude
             w_l = mix * 2.0
             w_g = (1.0 - mix) * 2.0
 
