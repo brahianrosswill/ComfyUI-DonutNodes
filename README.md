@@ -14,89 +14,85 @@ Donut Detailer 4: Making it more barebone, without the coefficients.
 
 Thanks to epiTune for helping me make this, and ChatGPT. Note: epiTune does not think this is the best solution to adding more texture as it is a a crude way of modifying the model, use it sparingly.
 
-Donut Clip Encode (Mix Only)
+# Donut Clip Encode (Mix Only)
 
-A custom ComfyUI node for Stable Diffusion XL that gives you fine-grained control over the balance between the two CLIP branches ("g" and "l"). Instead of separate strength sliders, this node offers a single Mix slider and four handy presets to adjust how prompts are encoded and combined.
+A custom ComfyUI node for Stable Diffusion XL that lets you blend the two CLIP branches ("g" and "l") with a single **Mix** slider and convenient presets.
 
-Installation
+---
 
-Copy DonutClipEncodeMixOnly.py into your custom_nodes/ComfyUI-DonutDetailer/ folder.
+## 📦 Installation
 
-Clear the UI cache:
+1. Copy `DonutClipEncodeMixOnly.py` into your ComfyUI `custom_nodes/ComfyUI-DonutDetailer/` folder.  
+2. Clear the UI cache:
+   ```bash
+   rm ~/.cache/comfyui/ui_cache_nodes.json
+   ```
+3. Restart ComfyUI.  
+4. In the node picker, search for **Donut Clip Encode (Mix Only)** and add it to your graph.
 
-rm ~/.cache/comfyui/ui_cache_nodes.json
+---
 
-Restart ComfyUI.
+## ⚙️ Inputs
 
-In the node picker, search for Donut Clip Encode (Mix Only).
+| Name                   | Type    | Description                                                                                       |
+|------------------------|---------|---------------------------------------------------------------------------------------------------|
+| `clip`                 | CLIP    | The CLIP encoder from your SDXL pipeline.                                                         |
+| `width` / `height`     | INT     | Base image resolution. Scaled internally by **size_cond_factor**.                                  |
+| `text_g` / `text_l`    | STRING  | "Guidance" and "Language" prompts for the two CLIP branches.                                  |
+| `mix`                  | FLOAT   | (0.0–1.0) Linear blend used by **Split Only** and **Continuous** presets.                          |
+| `split_vs_pooled_ratio`| FLOAT   | (0.0–1.0) Blend used only by the **Split vs Pooled** preset to mix sequence vs pooled embeddings. |
+| `preset`               | ENUM    | Choose one of: `Default`, `Split Only`, `Continuous`, `Split vs Pooled`.                           |
+| `size_cond_factor`     | INT     | Upscale factor for internal CLIP resolution.                                                      |
+| `layer_idx`            | INT     | CLIP layer index to stop at (e.g. `-2` for penultimate).                                         |
 
-Inputs
+---
 
-clip: The CLIP encoder from your SDXL pipeline.
+## 🎛️ Presets
 
-width / height: Base resolution (scaled internally by size_cond_factor).
+### 🅰️ Default
+Encodes both prompts in a single pass with:
+```python
+cond, pooled = clip.encode_from_tokens({ 'g': tokens_g, 'l': tokens_l }, return_pooled=True)
+``` 
+**Use case:** Standard SDXL behavior.
 
-text_g / text_l: Guidance and language prompts for the two CLIP branches.
+### 🅱️ Split Only
+Two‐pass encoding:
+```python
+cond_split   = cond_g * (1-mix) + cond_l * mix
+pooled_split = pooled_g * (1-mix) + pooled_l * mix
+``` 
+**Use case:** Direct control of each branch’s contribution.
 
-mix: A value between 0.0 → 1.0 controlling the linear blend for the Split Only and Continuous presets.
-
-split_vs_pooled_ratio: A value between 0.0 → 1.0 used only by the Split vs Pooled preset to blend sequence vs pooled embeddings.
-
-preset: Choose one of:
-
-Default: Standard joint encode of both prompts.
-
-Split Only: Two‑pass encode (g‑only + l‑only) blended by mix.
-
-Continuous: Smooth, gamma‑biased interpolation (mix^(1/3)) between joint and split encodings.
-
-Split vs Pooled: Keeps the split sequence embeddings, but blends the pooled summary using an exponential bias (split_vs_pooled_ratio^0.3).
-
-size_cond_factor: Multiplier for internal CLIP resolution.
-
-layer_idx: CLIP stopping layer (e.g. -2 for penultimate).
-
-Presets Explained
-
-Default
-
-Behavior: Encodes both prompts in a single pass (encode_from_tokens({"g": …, "l": …})).
-
-Use case: When you want the out‑of‑the‑box SDXL behavior without any custom mixing.
-
-Split Only
-
-Behavior: Encodes g and l separately, then linearly blends their outputs by mix:
-
-cond_split   = cond_g * (1 - mix) + cond_l * mix
-pooled_split = pooled_g * (1 - mix) + pooled_l * mix
-
-Use case: Direct control over how much each branch contributes, without influencing the joint encoding at all.
-
-Continuous
-
-Behavior: Blends joint vs split encodings with a gamma‑root bias on mix:
-
+### 🆑 Continuous
+Smooth interpolation between joint and split:
+```python
 alpha = mix ** (1/3)
-cond   = cond_joint * (1 - alpha) + cond_split * alpha
-pooled = pooled_joint * (1 - alpha) + pooled_split * alpha
+cond   = cond_joint * (1-alpha) + cond_split * alpha
+pooled = pooled_joint * (1-alpha) + pooled_split * alpha
+``` 
+**Use case:** Gradual transition biased toward split.
 
-Use case: Gradual transition from joint to split behavior, with mid‑values weighted towards split for stronger effect.
-
-Split vs Pooled
-
-Behavior: Uses the split sequence embedding unmodified, but blends only the pooled summary between split and joint via:
-
+### 🆂 Split vs Pooled
+Keep full split sequence, but bias pooled summary:
+```python
 alpha = split_vs_pooled_ratio ** 0.3
-pooled = pooled_split * alpha + pooled_joint * (1 - alpha)
 cond   = cond_split
+pooled = pooled_split * alpha + pooled_joint * (1-alpha)
+``` 
+**Use case:** Full split detail with adjustable CFG strength.
 
-Use case: When you want the full detail from the split sequence but still adjust how much of the pooled (CFG) signal comes from each branch—mid‑slider values heavily biased toward the split summary.
+---
 
-Usage Tips
+## 💡 Tips
 
-Rapid prototyping: Try Split Only at mix=0.5 to evenly mix both branches with full CFG strength.
+- **Even mix:** Set **mix = 0.5** in **Split Only** for a 50/50 blend.  
+- **Strong split effect:** In **Continuous**, raise **mix > 0.7**.  
+- **High CFG strength:** In **Split vs Pooled**, small slider moves near 1.0 have large impact.
 
-Strong split signal: In Continuous, raising mix above 0.7 quickly shifts you toward the split encoding.
+---
 
-Fine‑tune CFG: In Split vs Pooled, use small adjustments near the extremes (0.8–1.0) to retain most of the split detail while dialing CFG influence.
+## 📜 License
+MIT © DonutsDelivery
+
+
