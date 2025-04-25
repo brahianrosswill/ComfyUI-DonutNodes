@@ -1,18 +1,101 @@
-This is an experimental node I made to mimick the "adjust" in A1111 Supermerger (https://github.com/hako-mikan/sd-webui-supermerger?tab=readme-ov-file#adjust). It adds more noise and texture to the output, and can also adjust gamma/brightness using the last parameter. The 3 variants are fundamentally doing the same thing, but with different parameter controls. Scale/multiplier multiplies the S1 (weight) and S2 (bias) parameters. 
+# ComfyUI-DonutDetailer
 
-Donut Detailer: Initial try at making the node, dosent mimick supermerger accurately. 
+A collection of **“Donut Detailer”** custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), enabling fine-grained control over model and LoRA weight/bias parameters.
 
-![image](https://github.com/user-attachments/assets/b0477a38-86c2-42fd-a635-82afdef3b8a4)
+---
 
-Donut Detailer 2: Mimicks closes Supermerger Adjust parameters. 
+## 📦 Installation
 
-![image](https://github.com/user-attachments/assets/6d0cc683-e005-481b-abe4-487700686df3)
+1. Copy or clone the repo into your ComfyUI `custom_nodes` folder:  
+   ```bash
+   git clone https://github.com/DonutsDelivery/ComfyUI-DonutDetailer.git ~/.config/ComfyUI/custom_nodes/ComfyUI-DonutDetailer
 
-Donut Detailer 4: Making it more barebone, without the coefficients. 
+    Restart ComfyUI.
 
-![image](https://github.com/user-attachments/assets/e1bafb1c-a24a-448e-92f9-f9e27f98157d)
+    The new nodes will appear under Model Patches and LoRA Patches.
 
-Thanks to epiTune for helping me make this, and ChatGPT. Note: epiTune does not think this is the best solution to adding more texture as it is a a crude way of modifying the model, use it sparingly.
+⚙️ Nodes
+🍩 Donut Detailer (Model)
+Inputs
+Name	Type	Description
+MODEL	MODEL	The model to patch.
+Scale_in	FLOAT	Scale factor for input-group weight adjustments.
+Weight_in	FLOAT	Input-group weight multiplier.
+Bias_in	FLOAT	Input-group bias multiplier.
+Scale_out0	FLOAT	Scale factor for first output-group weight adjustments.
+Weight_out0	FLOAT	First output-group weight multiplier.
+Bias_out0	FLOAT	First output-group bias multiplier.
+Scale_out2	FLOAT	Scale factor for second output-group weight adjustments.
+Weight_out2	FLOAT	Second output-group weight multiplier.
+Bias_out2	FLOAT	Second output-group bias multiplier.
+Effect
+
+    Weights: 1 – Scale × Weight
+
+    Biases: 1 + Scale × Bias
+
+🍩 Donut Detailer 2 (Model)
+Inputs
+Name	Type	Description
+MODEL	MODEL	The model to patch.
+K_in	FLOAT	Base coefficient for input-group weight/bias.
+S1_in	FLOAT	Weight-scale factor for input-group.
+S2_in	FLOAT	Bias-scale factor for input-group.
+K_out0	FLOAT	Base coefficient for first output-group weight/bias.
+S1_out0	FLOAT	Weight-scale factor for first output-group.
+S2_out0	FLOAT	Bias-scale factor for first output-group.
+K_out2	FLOAT	Base coefficient for second output-group weight/bias.
+S1_out2	FLOAT	Weight-scale factor for second output-group.
+S2_out2	FLOAT	Bias-scale factor for second output-group.
+Formula
+
+Weight multiplier = 1 – (K × S1 × 0.01)
+Bias multiplier   = 1 + (K × S2 × 0.02)
+
+🍩 Donut Detailer 4 (Model)
+Inputs
+Name	Type	Description
+MODEL	MODEL	The model to patch.
+Weight_in	FLOAT	Input-group weight multiplier (direct).
+Bias_in	FLOAT	Input-group bias multiplier (direct).
+Weight_out0	FLOAT	First output-group weight multiplier (direct).
+Bias_out0	FLOAT	First output-group bias multiplier (direct).
+Weight_out2	FLOAT	Second output-group weight multiplier (direct).
+Bias_out2	FLOAT	Second output-group bias multiplier (direct).
+Effect
+
+Multiplies each group’s weights and biases by the slider value (default 1 = bypass).
+🍩 Donut Detailer LoRA 6 (LoRA)
+Inputs
+Name	Type	Description
+LoRA	LoRA	The LoRA patch to modify.
+Weight_down	FLOAT	Down-layer weight multiplier.
+Bias_down	FLOAT	Down-layer bias multiplier.
+Weight_mid	FLOAT	Mid-layer weight multiplier.
+Bias_mid	FLOAT	Mid-layer bias multiplier.
+Weight_up	FLOAT	Up-layer weight multiplier.
+Bias_up	FLOAT	Up-layer bias multiplier.
+Effect
+
+Scales LoRA down/mid/up layers’ weights & biases and lets you save the modified LoRA directly.
+🍩 Donut Detailer XL Blocks (Model)
+Inputs
+Name	Type	Description
+MODEL	MODEL	The model to patch.
+W_block_*	FLOAT	Weight multiplier for each SDXL UNet block (various).
+B_block_*	FLOAT	Bias multiplier for each SDXL UNet block (various).
+Effect
+
+Direct control over every major SDXL UNet block for highly granular tweaking.
+💡 Tips
+
+    Use Donut Detailer 2 for the closest mimic of Supermerger’s “Adjust.”
+
+    Use Donut Detailer 4 for straightforward weight/bias multipliers.
+
+    Use LoRA 6 to save custom-scaled LoRA patches.
+
+    Use XL Blocks when you need per-block control in SDXL.
 
 # Donut Clip Encode (Mix Only)
 
