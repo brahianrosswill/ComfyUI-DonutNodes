@@ -4,7 +4,6 @@ import copy
 class DonutDetailerLoRA5:
     # Must be uppercase “LoRA”
     class_type = "LoRA"
-    aux_id = "DonutsDelivery/ComfyUI-DonutDetailer"
 
     @classmethod
     def INPUT_TYPES(cls):
