@@ -140,7 +140,7 @@ MIT © DonutsDelivery
 
 # Donut Clip Encode (Mix Only)
 
-A custom ComfyUI node for Stable Diffusion XL that lets you blend the two CLIP branches ("g" and "l") with a single **Mix** slider and convenient presets.
+A custom ComfyUI node for Stable Diffusion XL that gives you both **Mix Mode** and **Strength Mode** to control how the two CLIP branches ("g" and "l") combine.
 
 ---
 
@@ -158,61 +158,58 @@ A custom ComfyUI node for Stable Diffusion XL that lets you blend the two CLIP b
 
 ## ⚙️ Inputs
 
-| Name                   | Type    | Description                                                                                       |
-|------------------------|---------|---------------------------------------------------------------------------------------------------|
-| `clip`                 | CLIP    | The CLIP encoder from your SDXL pipeline.                                                         |
-| `width` / `height`     | INT     | Base image resolution. Scaled internally by **size_cond_factor**.                                  |
-| `text_g` / `text_l`    | STRING  | "Guidance" and "Language" prompts for the two CLIP branches.                                  |
-| `mix`                  | FLOAT   | (0.0–1.0) Linear blend used by **Split Only** and **Continuous** presets.                          |
-| `split_vs_pooled_ratio`| FLOAT   | (0.0–1.0) Blend used only by the **Split vs Pooled** preset to mix sequence vs pooled embeddings. |
-| `preset`               | ENUM    | Choose one of: `Default`, `Split Only`, `Continuous`, `Split vs Pooled`.                           |
-| `size_cond_factor`     | INT     | Upscale factor for internal CLIP resolution.                                                      |
-| `layer_idx`            | INT     | CLIP layer index to stop at (e.g. `-2` for penultimate).                                         |
+| Name                      | Type    | Description                                                                                              |
+|---------------------------|---------|----------------------------------------------------------------------------------------------------------|
+| `clip`                    | CLIP    | The CLIP encoder from your SDXL pipeline.                                                                |
+| `width` / `height`        | INT     | Base image resolution. Scaled internally by **size_cond_factor**.                                        |
+| `text_g` / `text_l`       | STRING  | "Guidance" and "Language" prompts for the two CLIP branches.                                         |
+| `mode`                    | ENUM    | `Mix Mode` or `Strength Mode`. Toggles which controls are active.                                        |
+| `clip_gl_mix`             | FLOAT   | (0.0–1.0) Mix slider for all mix-based presets when in **Mix Mode**.                                     |
+| `vs_mix`                  | FLOAT   | (0.0–1.0) Ratio slider for **Split vs Pooled** preset in **Mix Mode**.                                   |
+| `clip_g_strength`         | FLOAT   | Strength for branch **g** (used only in **Strength Mode**).                                              |
+| `clip_l_strength`         | FLOAT   | Strength for branch **l** (used only in **Strength Mode**).                                              |
+| `strength_default`        | FLOAT   | Weight for **Default** embedding (only for **Strength Blend** preset in **Mix Mode**).                    |
+| `strength_split`          | FLOAT   | Weight for **Split Only** embedding (only for **Strength Blend** preset).                                 |
+| `strength_continuous`     | FLOAT   | Weight for **Continuous** embedding (only for **Strength Blend** preset).                                |
+| `preset`                  | ENUM    | In **Mix Mode**, choose one of: `Default`, `Split Only`, `Continuous`, `Split vs Pooled`,                  |
+|                           |         | `Split vs Continuous`, `Default vs Split`, `Default vs Continuous`, or `Strength Blend`.                  |
+| `size_cond_factor`        | INT     | Upscale factor for internal CLIP resolution.                                                             |
+| `layer_idx`               | INT     | CLIP layer index to stop at (e.g. `-2` for penultimate).                                                |
 
 ---
 
-## 🎛️ Presets
+## 🎛️ Modes & Presets
 
-### 🅰️ Default
-Encodes both prompts in a single pass with:
-```python
-cond, pooled = clip.encode_from_tokens({ 'g': tokens_g, 'l': tokens_l }, return_pooled=True)
-``` 
-**Use case:** Standard SDXL behavior.
+### 🔀 Mix Mode
+Uses `clip_gl_mix`, `vs_mix`, and `preset` to control blending.
 
-### 🅱️ Split Only
-Two‐pass encoding:
-```python
-cond_split   = cond_g * (1-mix) + cond_l * mix
-pooled_split = pooled_g * (1-mix) + pooled_l * mix
-``` 
-**Use case:** Direct control of each branch’s contribution.
+| Preset                   | Behavior                                                                                      |
+|--------------------------|-----------------------------------------------------------------------------------------------|
+| **Default**              | Single-pass joint encode.                                                                     |
+| **Split Only**           | Two-pass encode, linear blend by `clip_gl_mix`.                                                |
+| **Continuous**           | Gamma-blended joint↔split via `clip_gl_mix^(1/3)`.                                              |
+| **Split vs Pooled**      | Split sequence full, gamma blend pooled summary by `vs_mix^0.3`.                               |
+| **Split vs Continuous**  | Linear blend between split-only and continuous by `clip_gl_mix`.                                |
+| **Default vs Split**     | Linear blend joint vs split-only by `clip_gl_mix`.                                              |
+| **Default vs Continuous**| Linear blend joint vs continuous by `clip_gl_mix`.                                              |
+| **Strength Blend**       | Blend three embeddings (Default/Split/Continuous) by `strength_default`, `strength_split`,     |
+|                          | `strength_continuous` (normalized weights).                                                   |
 
-### 🆑 Continuous
-Smooth interpolation between joint and split:
+### 🏋️ Strength Mode
+Uses `clip_g_strength` and `clip_l_strength` directly to weight the two branches in a single pass:
 ```python
-alpha = mix ** (1/3)
-cond   = cond_joint * (1-alpha) + cond_split * alpha
-pooled = pooled_joint * (1-alpha) + pooled_split * alpha
-``` 
-**Use case:** Gradual transition biased toward split.
-
-### 🆂 Split vs Pooled
-Keep full split sequence, but bias pooled summary:
-```python
-alpha = split_vs_pooled_ratio ** 0.3
-cond   = cond_split
-pooled = pooled_split * alpha + pooled_joint * (1-alpha)
-``` 
-**Use case:** Full split detail with adjustable CFG strength.
+cond = cond_g * clip_g_strength + cond_l * clip_l_strength
+pooled = pooled_g * clip_g_strength + pooled_l * clip_l_strength
+```
 
 ---
 
 ## 💡 Tips
 
-- **Even mix:** Set **mix = 0.5** in **Split Only** for a 50/50 blend.  
-- **Strong split effect:** In **Continuous**, raise **mix > 0.7**.  
-- **High CFG strength:** In **Split vs Pooled**, small slider moves near 1.0 have large impact.
+- In **Mix Mode**, try **Split Only** at `clip_gl_mix=0.5` for an even split.  
+- In **Continuous**, raise `clip_gl_mix > 0.7` for strong split bias.  
+- **Strength Mode** is handy for direct CFG control per branch.  
+- **Strength Blend** lets you combine all three core embeddings with custom weights.
 
 ---
 
