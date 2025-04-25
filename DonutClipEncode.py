@@ -3,7 +3,6 @@ from nodes import MAX_RESOLUTION
 
 class DonutClipEncode:
     class_type = "CLIP"
-    aux_id     = "DonutsDelivery/ComfyUI-DonutDetailer"
 
     @classmethod
     def INPUT_TYPES(s):
