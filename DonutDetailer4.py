@@ -4,7 +4,6 @@ import copy
 class DonutDetailer4:
     # Required property for ComfyUI.
     class_type = "MODEL"
-    aux_id = "DonutsDelivery/ComfyUI-DonutDetailer"
 
     @classmethod
     def INPUT_TYPES(cls):
