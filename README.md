@@ -6,13 +6,14 @@ A collection of **“Donut Detailer”** custom nodes for [ComfyUI](https://gith
 
 ## 📦 Installation
 
-1. Copy or clone the repo into your ComfyUI `custom_nodes` folder:  
+1. Clone into your ComfyUI `custom_nodes` folder:  
    ```bash
-   git clone https://github.com/DonutsDelivery/ComfyUI-DonutDetailer.git ~/.config/ComfyUI/custom_nodes/ComfyUI-DonutDetailer
+   cd ~/.config/ComfyUI/custom_nodes
+   git clone https://github.com/DonutsDelivery/ComfyUI-DonutDetailer.git
 
     Restart ComfyUI.
 
-    The new nodes will appear under Model Patches and LoRA Patches.
+    In the node picker, look under Model Patches and LoRA Patches.
 
 ⚙️ Nodes
 🍩 Donut Detailer (Model)
