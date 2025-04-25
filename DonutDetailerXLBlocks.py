@@ -4,7 +4,6 @@ import copy
 class DonutDetailerXLBlocks:
     class_type = "MODEL"
     # Make sure aux_id matches your GitHub repo slug
-    aux_id = "DonutsDelivery/ComfyUI-DonutDetailer"
 
     @classmethod
     def INPUT_TYPES(cls):
