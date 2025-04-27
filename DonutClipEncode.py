@@ -3,6 +3,7 @@ from nodes import MAX_RESOLUTION
 
 class DonutClipEncode:
     class_type = "CLIP"
+    aux_id     = "DonutsDelivery/ComfyUI-DonutDetailer"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -20,12 +21,12 @@ class DonutClipEncode:
             # Strength Mode sliders
             "clip_g_strength":     ("FLOAT", {"default": 1.0,  "min": 0.0, "max": 1000.0, "step": 0.01}),
             "clip_l_strength":     ("FLOAT", {"default": 1.0,  "min": 0.0, "max": 1000.0, "step": 0.01}),
-            # Strength Blend preset sliders (only used in Mix Mode preset)
+            # Strength Blend preset sliders (Mix Mode only)
             "strength_default":    ("FLOAT", {"default": 1.0,  "min": 0.0, "max": 10.0,   "step": 0.01}),
             "strength_split":      ("FLOAT", {"default": 1.0,  "min": 0.0, "max": 10.0,   "step": 0.01}),
             "strength_continuous": ("FLOAT", {"default": 1.0,  "min": 0.0, "max": 10.0,   "step": 0.01}),
             # Mix Mode presets
-            "preset":              ([
+            "preset":             ([
                                       "Default",
                                       "Split Only",
                                       "Continuous",
@@ -43,58 +44,82 @@ class DonutClipEncode:
     FUNCTION     = "execute"
     CATEGORY     = "essentials"
 
-    def execute(
-        self,
-        clip,
-        width,
-        height,
-        text_g,
-        text_l,
-        mode,
-        clip_gl_mix,
-        vs_mix,
-        clip_g_strength,
-        clip_l_strength,
-        strength_default,
-        strength_split,
-        strength_continuous,
-        preset,
-        size_cond_factor,
-        layer_idx
-    ):
-        # 1) Upscale
+    def execute(self,
+                clip,
+                width,
+                height,
+                text_g,
+                text_l,
+                mode,
+                clip_gl_mix,
+                vs_mix,
+                clip_g_strength,
+                clip_l_strength,
+                strength_default,
+                strength_split,
+                strength_continuous,
+                preset,
+                size_cond_factor,
+                layer_idx):
+        # 1) Upscale resolution
         width  *= size_cond_factor
         height *= size_cond_factor
 
-        # 2) Prepare CLIP
+        # 2) Prepare CLIP and stop at layer
         clip = clip.clone()
         clip.clip_layer(layer_idx)
 
-        # 3) Tokenize
+        # 3) Tokenize prompts and pad to equal length
         empty = clip.tokenize("")
         eg, el = empty['g'], empty['l']
-        tg = clip.tokenize(text_g) if text_g.strip() else empty
-        tl = clip.tokenize(text_l) if text_l.strip() else empty
+        tg = clip.tokenize(text_g) if text_g.strip() else clip.tokenize("")
+        tl = clip.tokenize(text_l) if text_l.strip() else clip.tokenize("")
+        # pad shorter token list
+        while len(tg['g']) > len(tl['l']):
+            tl['l'] += el
+        while len(tl['l']) > len(tg['g']):
+            tg['g'] += eg
+        tokens = {'g': tg['g'], 'l': tl['l']}
 
-        # 4) Joint
-        cond_joint, pooled_joint = clip.encode_from_tokens({'g': tg['g'], 'l': tl['l']}, return_pooled=True)
-        # 5) Split-only
-        cond_g, pooled_g = clip.encode_from_tokens({'g': tg['g'], 'l': el}, return_pooled=True)
-        cond_l, pooled_l = clip.encode_from_tokens({'g': eg,       'l': tl['l']}, return_pooled=True)
+        # 4) Joint encoding
+        cond_joint, pooled_joint = clip.encode_from_tokens(tokens, return_pooled=True)
+
+                # 5) Split-only branch
+        seq_len = len(tokens['g'])
+        # pad empties to match joint sequence length
+        el_base = el
+        eg_base = eg
+        def pad(tokens_base):
+            if not tokens_base:
+                return []
+            repeat = (seq_len + len(tokens_base) - 1) // len(tokens_base)
+            padded = (tokens_base * repeat)[:seq_len]
+            return padded
+        empty_l_padded = pad(el_base)
+        empty_g_padded = pad(eg_base)
+
+        cond_g, pooled_g = clip.encode_from_tokens(
+            {'g': tokens['g'], 'l': empty_l_padded}, return_pooled=True
+        )
+        cond_l, pooled_l = clip.encode_from_tokens(
+            {'g': empty_g_padded, 'l': tokens['l']}, return_pooled=True
+        )
         cond_split   = cond_g   * (1 - clip_gl_mix) + cond_l   * clip_gl_mix
         pooled_split = pooled_g * (1 - clip_gl_mix) + pooled_l * clip_gl_mix
-        # 6) Continuous
+
+        # 6) Continuous branch (gamma-biased) (gamma-biased)
         exp     = 3.0
         alpha_c = clip_gl_mix ** (1.0 / exp)
         cond_cont   = cond_joint   * (1 - alpha_c) + cond_split   * alpha_c
         pooled_cont = pooled_joint * (1 - alpha_c) + pooled_split * alpha_c
 
-        # Strength Mode
+        # 7) Strength Mode
         if mode == 'Strength Mode':
             cond   = cond_g * clip_g_strength + cond_l * clip_l_strength
             pooled = pooled_g * clip_g_strength + pooled_l * clip_l_strength
+
         else:
-            # Mix Mode
+            # 8) Mix Mode dispatch
             if preset == 'Default':
                 cond, pooled = cond_joint, pooled_joint
             elif preset == 'Split Only':
@@ -116,20 +141,20 @@ class DonutClipEncode:
                 cond   = cond_joint   * (1 - clip_gl_mix) + cond_cont   * clip_gl_mix
                 pooled = pooled_joint * (1 - clip_gl_mix) + pooled_cont * clip_gl_mix
             elif preset == 'Strength Blend':
-                # blend three modes
+                # blend three mix-based embeddings
                 w_def = strength_default
                 w_sp  = strength_split
                 w_ct  = strength_continuous
-                tot = w_def + w_sp + w_ct
-                if tot <= 0:
+                total = w_def + w_sp + w_ct
+                if total <= 0:
                     cond, pooled = cond_joint, pooled_joint
                 else:
-                    cond   = (cond_joint* w_def   + cond_split* w_sp   + cond_cont* w_ct)   / tot
-                    pooled = (pooled_joint* w_def + pooled_split* w_sp + pooled_cont* w_ct) / tot
+                    cond   = (cond_joint* w_def   + cond_split* w_sp   + cond_cont* w_ct)   / total
+                    pooled = (pooled_joint* w_def + pooled_split* w_sp + pooled_cont* w_ct) / total
             else:
                 cond, pooled = cond_joint, pooled_joint
 
-        # 7) Wrap & return
+        # 9) Wrap and return
         return ([[cond, {'pooled_output': pooled, 'width': width, 'height': height}]],)
 
 NODE_CLASS_MAPPINGS = {
