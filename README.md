@@ -2,6 +2,9 @@
 
 A collection of **“Donut Detailer”** custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), enabling fine-grained control over model and LoRA weight/bias parameters.
 
+TLDR; ![image](https://github.com/user-attachments/assets/deeb3f65-47c5-4ee1-bcc6-c7920d9df321)
+
+
 ---
 
 ## 📦 Installation
