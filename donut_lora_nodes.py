@@ -1,8 +1,6 @@
-import comfy.sd
 import comfy.utils
 import folder_paths
-import hashlib
-from random import random, uniform
+from .lora_block_weight import LoraLoaderBlockWeight
 
 # ------------------------------------------------------------------------
 # CR: DonutLoRAStack
@@ -17,20 +15,22 @@ class DonutLoRAStack:
         loras = ["None"] + folder_paths.get_filename_list("loras")
         return {
             "required": {
-                "switch_1":       (["Off", "On"],),
+                "switch_1":       (["Off","On"],),
                 "lora_name_1":    (loras,),
-                "model_weight_1": ("FLOAT", {"default":1.0, "min":-10.0, "max":10.0, "step":0.01}),
-                "clip_weight_1":  ("FLOAT", {"default":1.0, "min":-10.0, "max":10.0, "step":0.01}),
+                "model_weight_1": ("FLOAT", {"default":1.0,"min":-10.0,"max":10.0,"step":0.01}),
+                "clip_weight_1":  ("FLOAT", {"default":1.0,"min":-10.0,"max":10.0,"step":0.01}),
                 "block_weights_1":("STRING",{"default":"1,1,1,1,1,1,1,1,1,1,1,1"}),
-                "switch_2":       (["Off", "On"],),
+
+                "switch_2":       (["Off","On"],),
                 "lora_name_2":    (loras,),
-                "model_weight_2": ("FLOAT", {"default":1.0, "min":-10.0, "max":10.0, "step":0.01}),
-                "clip_weight_2":  ("FLOAT", {"default":1.0, "min":-10.0, "max":10.0, "step":0.01}),
+                "model_weight_2": ("FLOAT", {"default":1.0,"min":-10.0,"max":10.0,"step":0.01}),
+                "clip_weight_2":  ("FLOAT", {"default":1.0,"min":-10.0,"max":10.0,"step":0.01}),
                 "block_weights_2":("STRING",{"default":"1,1,1,1,1,1,1,1,1,1,1,1"}),
-                "switch_3":       (["Off", "On"],),
+
+                "switch_3":       (["Off","On"],),
                 "lora_name_3":    (loras,),
-                "model_weight_3": ("FLOAT", {"default":1.0, "min":-10.0, "max":10.0, "step":0.01}),
-                "clip_weight_3":  ("FLOAT", {"default":1.0, "min":-10.0, "max":10.0, "step":0.01}),
+                "model_weight_3": ("FLOAT", {"default":1.0,"min":-10.0,"max":10.0,"step":0.01}),
+                "clip_weight_3":  ("FLOAT", {"default":1.0,"min":-10.0,"max":10.0,"step":0.01}),
                 "block_weights_3":("STRING",{"default":"1,1,1,1,1,1,1,1,1,1,1,1"}),
             },
             "optional": {
@@ -38,8 +38,8 @@ class DonutLoRAStack:
             }
         }
 
-    RETURN_TYPES    = ("LORA_STACK", "STRING")
-    RETURN_NAMES    = ("lora_stack", "show_help")
+    RETURN_TYPES    = ("LORA_STACK","STRING")
+    RETURN_NAMES    = ("lora_stack","show_help")
     FUNCTION        = "build_stack"
     CATEGORY        = "Comfyroll/LoRA"
 
@@ -77,7 +77,7 @@ class DonutLoRAStack:
 # CR: DonutApplyLoRAStack
 # ------------------------------------------------------------------------
 class DonutApplyLoRAStack:
-    """Apply a LORA_STACK to a MODEL+CLIP."""
+    """Apply a LORA_STACK (with per-block weights) to a MODEL+CLIP using LoraLoaderBlockWeight."""
     class_type = "CUSTOM"
     aux_id     = "DonutsDelivery/ComfyUI-DonutNodes"
 
@@ -91,33 +91,44 @@ class DonutApplyLoRAStack:
             }
         }
 
-    RETURN_TYPES    = ("MODEL", "CLIP", "STRING")
-    RETURN_NAMES    = ("model", "clip", "show_help")
+    RETURN_TYPES    = ("MODEL","CLIP","STRING")
+    RETURN_NAMES    = ("model","clip","show_help")
     FUNCTION        = "apply_stack"
     CATEGORY        = "Comfyroll/LoRA"
 
     def apply_stack(self, model, clip, lora_stack=None):
-        show_url = (
+        help_url = (
             "https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes/"
             "wiki/LoRA-Nodes#donut-apply-lora-stack"
         )
         if not lora_stack:
-            return (model, clip, show_url)
+            return (model, clip, help_url)
 
         m, c = model, clip
-        for name, m_str, c_str, _block_ws in lora_stack:
+        loader = LoraLoaderBlockWeight()
+
+        for name, model_strength, clip_strength, block_ws in lora_stack:
             pth = folder_paths.get_full_path("loras", name)
             lora = comfy.utils.load_torch_file(pth, safe_load=True)
-            # simplified call: no block_weights argument
-            m, c = comfy.sd.load_lora_for_models(m, c, lora, m_str, c_str)
 
-        return (m, c, show_url)
+            # *** unpack all three outputs here ***
+            m, c, _ = loader.load_lora_for_models(
+                m, c, lora,
+                strength_model=model_strength,
+                strength_clip=clip_strength,
+                inverse=False,
+                seed=0,
+                A=1.0, B=1.0,
+                block_vector=",".join(map(str, block_ws)),
+            )
+
+        return (m, c, help_url)
 
 
 # finally, export
 NODE_CLASS_MAPPINGS = {
-    "DonutLoRAStack":      DonutLoRAStack,
-    "DonutApplyLoRAStack": DonutApplyLoRAStack,
+    "DonutLoRAStack":       DonutLoRAStack,
+    "DonutApplyLoRAStack":  DonutApplyLoRAStack,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     key: key.replace("Donut", "Donut ") for key in NODE_CLASS_MAPPINGS
