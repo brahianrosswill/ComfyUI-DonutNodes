@@ -19,19 +19,19 @@ class DonutLoRAStack:
                 "lora_name_1":    (loras,),
                 "model_weight_1": ("FLOAT", {"default":1.0,"min":-10,"max":10,"step":0.01}),
                 "clip_weight_1":  ("FLOAT", {"default":1.0,"min":-10,"max":10,"step":0.01}),
-                "block_vector_1": ("STRING",{"default":"","placeholder":"12 comma-sep floats"}),
+                "block_vector_1": ("STRING",{"default":"1,1,1,1,1,1,1,1,1,1,1,1","placeholder":"12 comma-sep floats"}),
 
                 "switch_2":       (["Off","On"],),
                 "lora_name_2":    (loras,),
                 "model_weight_2": ("FLOAT", {"default":1.0,"min":-10,"max":10,"step":0.01}),
                 "clip_weight_2":  ("FLOAT", {"default":1.0,"min":-10,"max":10,"step":0.01}),
-                "block_vector_2": ("STRING",{"default":"","placeholder":"optional"}),
+                "block_vector_2": ("STRING",{"default":"1,1,1,1,1,1,1,1,1,1,1,1","placeholder":"optional"}),
 
                 "switch_3":       (["Off","On"],),
                 "lora_name_3":    (loras,),
                 "model_weight_3": ("FLOAT", {"default":1.0,"min":-10,"max":10,"step":0.01}),
                 "clip_weight_3":  ("FLOAT", {"default":1.0,"min":-10,"max":10,"step":0.01}),
-                "block_vector_3": ("STRING",{"default":"","placeholder":"optional"}),
+                "block_vector_3": ("STRING",{"default":"1,1,1,1,1,1,1,1,1,1,1,1","placeholder":"optional"}),
             },
             "optional": {"lora_stack": ("LORA_STACK",)},
         }
