@@ -1,6 +1,6 @@
 import re
 import torch
-from merging_methods import MergingMethods
+from .merging_methods import MergingMethods
 
 class DonutWidenMerge:
     class_type = "ANY"
