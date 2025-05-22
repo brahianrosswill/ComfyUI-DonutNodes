@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from .utils.utils import get_param_names_to_merge
-from model_merging_methods.task_vector import TaskVector
+from .task_vector import TaskVector
 
 
 def mask_input_with_mask_rate(input_tensor: torch.Tensor, mask_rate: float, use_rescale: bool, mask_strategy: str):
