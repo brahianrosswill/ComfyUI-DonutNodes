@@ -9,6 +9,97 @@ from .merging_methods import MergingMethod
 from diffusers import UNet2DConditionModel
 
 
+# Simple wrapper so that bare nn.Modules can be passed to ComfyUI's
+# CheckpointSave node.  The checkpoint system expects a MODEL wrapper with
+# a ``model`` attribute and helper methods such as ``get_model_object`` and
+# ``model_patches_to``.  This class provides lightweight stubs and forwards
+# unknown attribute access to the wrapped module.
+class _SimpleWrapper:
+    def __init__(self, unet=None, clip=None):
+        self._unet = unet
+        self._clip = clip
+        # Set an initial device based on the provided module
+        first_param = None
+        if unet is not None:
+            first_param = next(iter(unet.parameters()), None)
+        elif clip is not None:
+            first_param = next(iter(clip.parameters()), None)
+        self.load_device = getattr(first_param, "device", torch.device("cpu"))
+        self.parent = None
+        self.model_type = getattr(unet, "model_type", None)
+        self.model_sampling = getattr(unet, "model_sampling", None)
+
+        dummy = type("SimplePipeline", (), {})()
+        if unet is not None:
+            dummy.unet = unet
+            dummy.diffusion_model = unet
+        if clip is not None:
+            dummy.clip = clip
+            dummy.text_encoder = clip
+            dummy.text_encoder_1 = clip
+
+        # expose common attributes expected by CheckpointSave on the dummy
+        dummy.model_type = self.model_type
+        dummy.model_sampling = self.model_sampling
+        dummy.load_device = self.load_device
+        dummy.parent = self.parent
+        dummy.current_loaded_device = lambda: self.load_device
+        dummy.model_size = self.model_size
+        dummy.model_patches_to = self.model_patches_to
+        dummy.get_sd = self.get_sd
+        dummy.load_model = self.load_model
+
+        self.model = dummy
+        self.clip = getattr(dummy, "clip", None)
+
+    # ``get_model_object`` is used by the checkpoint saver to query components
+    # like ``model_sampling``.  If a name is provided return that attribute from
+    # the dummy model, otherwise return the dummy itself.
+    def get_model_object(self, name=None):
+        if name:
+            return getattr(self.model, name, None)
+        return self.model
+
+    def load_model(self):
+        return self.model
+
+    def get_sd(self):
+        sd = {}
+        if self._unet is not None:
+            sd.update(self._unet.state_dict())
+        if self._clip is not None:
+            sd.update({f"clip.{k}": v for k, v in self._clip.state_dict().items()})
+        return sd
+
+    def current_loaded_device(self):
+        return self.load_device
+
+    def model_size(self):
+        size = 0
+        for mdl in (self._unet, self._clip):
+            if mdl is not None:
+                size += sum(p.nelement() * p.element_size() for p in mdl.parameters())
+        return size
+
+    def model_patches_to(self, device):
+        if self._unet is not None:
+            self._unet.to(device)
+        if self._clip is not None:
+            self._clip.to(device)
+        self.load_device = device
+        self.model.load_device = device
+        return self
+
+    def __getattr__(self, name):
+        if hasattr(self.model, name):
+            return getattr(self.model, name)
+        if self._unet is not None and hasattr(self._unet, name):
+            return getattr(self._unet, name)
+        if self._clip is not None and hasattr(self._clip, name):
+            return getattr(self._clip, name)
+        raise AttributeError(name)
+
+
 # ─── HELPERS ────────────────────────────────────────────────────────────────────
 
 def _get_unet(wrapper):
@@ -168,8 +259,12 @@ class DonutWidenMergeUNet:
             torch.cuda.empty_cache()
             gc.collect()
 
-            # 10) **return the original wrapper** so CheckpointSave sees all its methods intact
-            return (orig_wrapper,)
+            # 10) return the wrapper. If the input was a bare UNet module,
+            # wrap it so the CheckpointSave node receives a compatible object.
+            if isinstance(orig_wrapper, UNet2DConditionModel):
+                return (_SimpleWrapper(unet=orig_wrapper),)
+            else:
+                return (orig_wrapper,)
 
         except Exception:
             print("\n[DonutWidenMergeUNet] *** Exception during merge ***")
@@ -238,8 +333,12 @@ class DonutWidenMergeCLIP:
             torch.cuda.empty_cache()
             gc.collect()
 
-            # return original wrapper so CheckpointSave can see .model / get_model_object()
-            return (orig_wrapper,)
+            # return the wrapper. If the input was a bare CLIP module, wrap it
+            # so the CheckpointSave node can use it.
+            if isinstance(orig_wrapper, nn.Module) and not hasattr(orig_wrapper, "model"):
+                return (_SimpleWrapper(clip=orig_wrapper),)
+            else:
+                return (orig_wrapper,)
 
         except Exception:
             print("\n[DonutWidenMergeCLIP] *** Exception during merge ***")
