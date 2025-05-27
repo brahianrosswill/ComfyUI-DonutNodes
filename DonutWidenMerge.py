@@ -48,6 +48,10 @@ class _SimpleWrapper:
         dummy.model_patches_to = self.model_patches_to
         dummy.get_sd = self.get_sd
         dummy.load_model = self.load_model
+        dummy.model_dtype = self.model_dtype
+        dummy.partially_load = self.partially_load
+        dummy.model_load = self.model_load
+        dummy.state_dict_for_saving = self.state_dict_for_saving
 
         self.model = dummy
         self.clip = getattr(dummy, "clip", None)
@@ -89,6 +93,42 @@ class _SimpleWrapper:
         self.load_device = device
         self.model.load_device = device
         return self
+
+    def model_dtype(self):
+        """Return the dtype of the underlying model parameters."""
+        for mdl in (self._unet, self._clip):
+            if mdl is not None:
+                try:
+                    param = next(iter(mdl.parameters()))
+                except StopIteration:
+                    param = None
+                if param is not None:
+                    return param.dtype
+        return torch.float32
+
+    # ------------------------------------------------------------------
+    # ComfyUI loader helpers
+    # ------------------------------------------------------------------
+    def partially_load(self, device, extra_memory=None, force_patch_weights=False):
+        """Mimic ``ModelPatcher.partially_load`` by moving weights to ``device``."""
+        self.model_patches_to(device)
+        return self
+
+    def model_load(self, *args, **kwargs):
+        """Simplified ``model_load`` used by ``model_management``."""
+        self.model_patches_to(self.load_device)
+        return self
+
+    def state_dict_for_saving(self, clip_sd=None, vae_sd=None, clip_vision_sd=None):
+        """Aggregate state dicts for saving via ``CheckpointSave``."""
+        sd = self.get_sd()
+        if clip_sd:
+            sd.update(clip_sd)
+        if vae_sd:
+            sd.update(vae_sd)
+        if clip_vision_sd:
+            sd.update(clip_vision_sd)
+        return sd
 
     def __getattr__(self, name):
         if hasattr(self.model, name):
