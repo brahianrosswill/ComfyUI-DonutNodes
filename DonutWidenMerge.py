@@ -81,6 +81,13 @@ class _SimpleWrapper:
             sd.update({f"clip.{k}": v for k, v in self._clip.state_dict().items()})
         return sd
 
+    # ComfyUI's `CheckpointSave` falls back to `state_dict()` when saving models
+    # that do not provide a dedicated `get_sd` method.  Expose it here so that a
+    # wrapped UNet/CLIP behaves like a regular ``nn.Module`` when passed directly
+    # into a saving node.
+    def state_dict(self):
+        return self.get_sd()
+
     def current_loaded_device(self):
         return self.load_device
 
@@ -106,36 +113,7 @@ class _SimpleWrapper:
 
     def model_patches_to(self, device):
         if self._unet is not None:
-            self._unet.to(device)
-        if self._clip is not None:
-            self._clip.to(device)
-        self.load_device = device
-        self.model.load_device = device
-        return self
-
-    def model_dtype(self):
-        """Return the dtype of the underlying model parameters."""
-        for mdl in (self._unet, self._clip):
-            if mdl is not None:
-                try:
-                    param = next(iter(mdl.parameters()))
-                except StopIteration:
-                    param = None
-                if param is not None:
-                    return param.dtype
-        return torch.float32
-
-    # ------------------------------------------------------------------
-    # ComfyUI loader helpers
-    # ------------------------------------------------------------------
-    def partially_load(self, device, extra_memory=None, force_patch_weights=False):
-        """Mimic ``ModelPatcher.partially_load`` by moving weights to ``device``."""
-        self.model_patches_to(device)
-        return self
-
-    def model_load(self, *args, **kwargs):
-        """Simplified ``model_load`` used by ``model_management``."""
-        self.model_patches_to(self.load_device)
+@@ -139,147 +146,323 @@ class _SimpleWrapper:
         return self
 
     def state_dict_for_saving(self, clip_sd=None, vae_sd=None, clip_vision_sd=None):
@@ -405,6 +383,24 @@ class DonutWidenMergeCLIP:
             raise
 
 
+# ─── WRAP CLIP UTILITY ────────────────────────────────────────────────────────
+class DonutWrapClip:
+    """Wrap a CLIP encoder in ``_SimpleWrapper`` for checkpoint saving."""
+    class_type = "CUSTOM"; aux_id = "DonutsDelivery/ComfyUI-DonutNodes"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"clip": ("CLIP",)}}
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION     = "execute"
+    CATEGORY     = "merging"
+
+    def execute(self, clip):
+        c = _get_clip(clip)
+        return (_SimpleWrapper(clip=c),)
+
+
 # ─── COMBINE WRAPPER UTILITY ─────────────────────────────────────────────────
 class DonutCombineWrapper:
     """Combine a UNet and CLIP module into a single wrapper for saving."""
@@ -434,6 +430,7 @@ NODE_CLASS_MAPPINGS = {
     "DonutMergeClipLists":    DonutMergeClipLists,
     "DonutWidenMergeUNet":    DonutWidenMergeUNet,
     "DonutWidenMergeCLIP":    DonutWidenMergeCLIP,
+    "DonutWrapClip":         DonutWrapClip,
     "DonutCombineWrapper":    DonutCombineWrapper,
 }
 
