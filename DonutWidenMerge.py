@@ -161,6 +161,7 @@ class _SimpleWrapper:
         raise AttributeError(name)
 
 
+
 # ─── HELPERS ────────────────────────────────────────────────────────────────────
 
 def _get_unet(wrapper):
@@ -183,127 +184,7 @@ def _get_clip(wrapper):
     """
     mdl = getattr(wrapper, "model", wrapper)
     # If it's already an nn.Module without pipeline attrs, assume it's the CLIP encoder:
-    if isinstance(mdl, nn.Module) and not any(
-        hasattr(mdl, a) for a in ("clip", "text_encoder", "text_encoder_1")
-    ):
-        return mdl
-    for attr in ("clip", "text_encoder", "text_encoder_1"):
-        cand = getattr(mdl, attr, None)
-        if isinstance(cand, nn.Module):
-            return cand
-    raise AttributeError(f"No CLIP encoder found on {type(mdl).__name__}")
-
-
-# ─── MODEL/CLIP LIST NODES (unchanged) ──────────────────────────────────────────
-
-class DonutMakeModelList2:
-    class_type = "CUSTOM"; aux_id = "DonutsDelivery/ComfyUI-DonutNodes"
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {"a": ("MODEL",), "b": ("MODEL",)}}
-    RETURN_TYPES = ("MODELLIST",); FUNCTION = "execute"; CATEGORY = "merging"
-    def execute(self, a, b): return ([a, b],)
-
-
-class DonutAppendModelToList:
-    class_type = "CUSTOM"; aux_id = "DonutsDelivery/ComfyUI-DonutNodes"
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {"lst": ("MODELLIST",), "m": ("MODEL",)}}
-    RETURN_TYPES = ("MODELLIST",); FUNCTION = "execute"; CATEGORY = "merging"
-    def execute(self, lst, m): return (lst + [m],)
-
-
-class DonutMergeModelLists:
-    class_type = "CUSTOM"; aux_id = "DonutsDelivery/ComfyUI-DonutNodes"
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {"x": ("MODELLIST",), "y": ("MODELLIST",)}}
-    RETURN_TYPES = ("MODELLIST",); FUNCTION = "execute"; CATEGORY = "merging"
-    def execute(self, x, y): return (x + y,)
-
-
-class DonutMakeClipList2:
-    class_type = "CUSTOM"; aux_id = "DonutsDelivery/ComfyUI-DonutNodes"
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {"a": ("CLIP",), "b": ("CLIP",)}}
-    RETURN_TYPES = ("CLIPLIST",); FUNCTION = "execute"; CATEGORY = "merging"
-    def execute(self, a, b): return ([a, b],)
-
-
-class DonutAppendClipToList:
-    class_type = "CUSTOM"; aux_id = "DonutsDelivery/ComfyUI-DonutNodes"
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {"lst": ("CLIPLIST",), "c": ("CLIP",)}}
-    RETURN_TYPES = ("CLIPLIST",); FUNCTION = "execute"; CATEGORY = "merging"
-    def execute(self, lst, c): return (lst + [c],)
-
-
-class DonutMergeClipLists:
-    class_type = "CUSTOM"; aux_id = "DonutsDelivery/ComfyUI-DonutNodes"
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {"x": ("CLIPLIST",), "y": ("CLIPLIST",)}}
-    RETURN_TYPES = ("CLIPLIST",); FUNCTION = "execute"; CATEGORY = "merging"
-    def execute(self, x, y): return (x + y,)
-
-
-# ─── WIDEN MERGE UNET ──────────────────────────────────────────────────────────
-
-class DonutWidenMergeUNet:
-    """Widen-merge a list of SDXL U-Nets in-place on the original pipeline wrapper."""
-    class_type = "CUSTOM"; aux_id = "DonutsDelivery/ComfyUI-DonutNodes"
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {
-            "models":        ("MODELLIST",),
-            "exclude_regex": ("STRING", {"default": ""}),
-            "above_avg":     ("FLOAT",  {"default": 1.0, "min": 0.0}),
-            "score_calib":   ("FLOAT",  {"default": 1.0, "min": 0.0}),
-        }}
-
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION     = "execute"
-    CATEGORY     = "merging"
-
-    def execute(self, models, exclude_regex, above_avg, score_calib):
-        try:
-            print(f"\n[DonutWidenMergeUNet] Starting merge of {len(models)} pipelines…")
-            # 1) keep the original ComfyUI model wrapper
-            orig_wrapper = models[0]
-
-            # 2) extract every UNet2DConditionModel (in each wrapper)
-            wrappers = models
-            unets    = [_get_unet(w) for w in wrappers]
-
-            # 3) grab devices
-            cpu   = torch.device("cpu")
-            gpu   = next(unets[0].parameters()).device
-
-            # 4) offload all to CPU
-            for u in unets:
-                u.to(cpu)
-
-            # 5) parse your regex list
-            regexes = [r.strip() for r in exclude_regex.split(",") if r.strip()]
-
-            # 6) run widen_merging on CPU
-            merger = MergingMethod("widen_merging")
-            with torch.no_grad():
-                print("[DonutWidenMergeUNet] Invoking MergingMethod.widen_merging()…")
-                merged_weights = merger.widen_merging(
-                    merged_model=unets[0],
-                    models_to_merge=unets[1:],
-                    exclude_param_names_regex=regexes,
-                    above_average_value_ratio=above_avg,
-                    score_calibration_value=score_calib,
-                )
-
-            # 7) if any weights came back, load them
-            if isinstance(merged_weights, dict) and merged_weights:
+@@ -286,50 +323,51 @@ class DonutWidenMergeUNet:
                 print("[DonutWidenMergeUNet] Loading merged weights back onto original UNet…")
                 unets[0].load_state_dict(merged_weights, strict=False)
             else:
@@ -329,6 +210,7 @@ class DonutWidenMergeUNet:
 
         except Exception:
             print("\n[DonutWidenMergeUNet] *** Exception during merge ***")
+            import traceback
             traceback.print_exc()
             raise
 
@@ -354,30 +236,7 @@ class DonutWidenMergeCLIP:
 
     def execute(self, clips, exclude_regex, above_avg, score_calib):
         try:
-            print(f"\n[DonutWidenMergeCLIP] Starting merge of {len(clips)} CLIP encoders…")
-            orig_wrapper = clips[0]
-            wrappers     = clips
-            encs         = [_get_clip(w) for w in wrappers]
-
-            # offload
-            cpu = torch.device("cpu")
-            for c in encs:
-                c.to(cpu)
-
-            # parse
-            regexes = [r.strip() for r in exclude_regex.split(",") if r.strip()]
-
-            # merge
-            merger = MergingMethod("widen_merging")
-            with torch.no_grad():
-                print("[DonutWidenMergeCLIP] Invoking MergingMethod.widen_merging()…")
-                merged_weights = merger.widen_merging(
-                    merged_model=encs[0],
-                    models_to_merge=encs[1:],
-                    exclude_param_names_regex=regexes,
-                    above_average_value_ratio=above_avg,
-                    score_calibration_value=score_calib,
-                )
+@@ -360,45 +398,46 @@ class DonutWidenMergeCLIP:
 
             # load back onto the first CLIP
             if isinstance(merged_weights, dict) and merged_weights:
@@ -403,6 +262,7 @@ class DonutWidenMergeCLIP:
 
         except Exception:
             print("\n[DonutWidenMergeCLIP] *** Exception during merge ***")
+            import traceback
             traceback.print_exc()
             raise
 
