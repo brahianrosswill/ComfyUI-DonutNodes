@@ -18,13 +18,15 @@ class _SimpleWrapper:
     def __init__(self, unet=None, clip=None):
         self._unet = unet
         self._clip = clip
-        # Set an initial device based on the provided module
+
+        # Determine device
         first_param = None
         if unet is not None:
             first_param = next(iter(unet.parameters()), None)
         elif clip is not None:
             first_param = next(iter(clip.parameters()), None)
         self.load_device = getattr(first_param, "device", torch.device("cpu"))
+
         self.parent = None
         self.model_type = getattr(unet, "model_type", None)
         self.model_sampling = getattr(unet, "model_sampling", None)
@@ -42,15 +44,12 @@ class _SimpleWrapper:
             if not hasattr(dummy, "model"):
                 dummy.model = clip
 
-        # expose common attributes expected by CheckpointSave on the dummy
         dummy.model_type = self.model_type
         dummy.model_sampling = self.model_sampling
         dummy.load_device = self.load_device
         dummy.parent = self.parent
         dummy.current_loaded_device = lambda: self.load_device
         dummy.model_size = self.model_size
-        dummy.loaded_size = self.loaded_size
-        dummy.model_memory_required = self.model_memory_required
         dummy.model_patches_to = self.model_patches_to
         dummy.get_sd = self.get_sd
         dummy.load_model = self.load_model
@@ -58,13 +57,12 @@ class _SimpleWrapper:
         dummy.partially_load = self.partially_load
         dummy.model_load = self.model_load
         dummy.state_dict_for_saving = self.state_dict_for_saving
+        dummy.loaded_size = self.loaded_size
+        dummy.model_memory_required = self.model_memory_required
 
         self.model = dummy
         self.clip = getattr(dummy, "clip", None)
 
-    # ``get_model_object`` is used by the checkpoint saver to query components
-    # like ``model_sampling``.  If a name is provided return that attribute from
-    # the dummy model, otherwise return the dummy itself.
     def get_model_object(self, name=None):
         if name:
             return getattr(self.model, name, None)
@@ -76,15 +74,11 @@ class _SimpleWrapper:
     def get_sd(self):
         sd = {}
         if self._unet is not None:
-            sd.update({k: v for k, v in self._unet.state_dict().items()})
+            sd.update({f"unet.{k}": v for k, v in self._unet.state_dict().items()})
         if self._clip is not None:
-            sd.update({f"clip.{k}": v for k, v in self._clip.state_dict().items()})
+            sd.update({f"text_encoder.{k}": v for k, v in self._clip.state_dict().items()})
         return sd
 
-    # ComfyUI's `CheckpointSave` falls back to `state_dict()` when saving models
-    # that do not provide a dedicated `get_sd` method.  Expose it here so that a
-    # wrapped UNet/CLIP behaves like a regular ``nn.Module`` when passed directly
-    # into a saving node.
     def state_dict(self):
         return self.get_sd()
 
@@ -99,35 +93,61 @@ class _SimpleWrapper:
         return size
 
     def loaded_size(self):
-        total = 0
+        size = 0
         for mdl in (self._unet, self._clip):
             if mdl is None:
                 continue
             for p in mdl.parameters():
                 if p.device == self.load_device:
-                    total += p.nelement() * p.element_size()
-        return total
+                    size += p.nelement() * p.element_size()
+        return size
 
     def model_memory_required(self, device):
         return self.model_size()
 
     def model_patches_to(self, device):
         if self._unet is not None:
-@@ -139,147 +146,323 @@ class _SimpleWrapper:
+            self._unet.to(device)
+        if self._clip is not None:
+            self._clip.to(device)
+        self.load_device = device
+        self.model.load_device = device
+        return self
+
+    def model_dtype(self):
+        for mdl in (self._unet, self._clip):
+            if mdl is not None:
+                try:
+                    param = next(iter(mdl.parameters()))
+                except StopIteration:
+                    param = None
+                if param is not None:
+                    return param.dtype
+        return torch.float32
+
+    def partially_load(self, device, extra_memory=None, force_patch_weights=False):
+        self.model_patches_to(device)
+        return self
+
+    def model_load(self, *args, **kwargs):
+        self.model_patches_to(self.load_device)
         return self
 
     def state_dict_for_saving(self, clip_sd=None, vae_sd=None, clip_vision_sd=None):
-        """Aggregate state dicts for saving via ``CheckpointSave``."""
-        base = {}
-        for k, v in self.get_sd().items():
-            base[k] = v.detach().cpu().half()
+        sd = {}
+        if self._unet is not None:
+            for k, v in self._unet.state_dict().items():
+                sd[f"unet.{k}"] = v.to("cpu").half()
+        if self._clip is not None:
+            for k, v in self._clip.state_dict().items():
+                sd[f"text_encoder.{k}"] = v.to("cpu").half()
         if clip_sd:
-            base.update({k: v.detach().cpu().half() for k, v in clip_sd.items()})
+            sd.update({k: v.to("cpu").half() for k, v in clip_sd.items()})
         if vae_sd:
-            base.update({k: v.detach().cpu().half() for k, v in vae_sd.items()})
+            sd.update({k: v.to("cpu").half() for k, v in vae_sd.items()})
         if clip_vision_sd:
-            base.update({k: v.detach().cpu().half() for k, v in clip_vision_sd.items()})
-        return base
+            sd.update({k: v.to("cpu").half() for k, v in clip_vision_sd.items()})
+        return sd
 
     def __getattr__(self, name):
         if hasattr(self.model, name):
