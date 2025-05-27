@@ -13,6 +13,39 @@ from .convert_diffusers_to_original_sdxl import (
     convert_openclip_text_enc_state_dict,
 )
 
+# -----------------------------------------------------------------------------
+# Import the SDXL conversion helpers. When ComfyUI loads custom nodes from a
+# file path, relative imports may fail. Attempt a regular package import first
+# and fall back to loading the file directly if needed.
+# -----------------------------------------------------------------------------
+try:  # normal package import
+    from .convert_diffusers_to_original_sdxl import (
+        convert_unet_state_dict,
+        convert_openai_text_enc_state_dict,
+        convert_openclip_text_enc_state_dict,
+    )
+except Exception:  # pragma: no cover - fallback for non-package loading
+    import importlib.util, os
+
+    _conv_path = os.path.join(
+        os.path.dirname(__file__),
+        "convert_diffusers_to_original_sdxl.py",
+    )
+
+    _spec = importlib.util.spec_from_file_location(
+        "convert_diffusers_to_original_sdxl", _conv_path
+    )
+    _conv_mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_conv_mod)
+
+    convert_unet_state_dict = _conv_mod.convert_unet_state_dict
+    convert_openai_text_enc_state_dict = (
+        _conv_mod.convert_openai_text_enc_state_dict
+    )
+    convert_openclip_text_enc_state_dict = (
+        _conv_mod.convert_openclip_text_enc_state_dict
+    )
+
 
 # Simple wrapper so that bare nn.Modules can be passed to ComfyUI's
 # CheckpointSave node.  The checkpoint system expects a MODEL wrapper with
