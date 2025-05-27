@@ -7,6 +7,11 @@ from tqdm import tqdm
 
 from .merging_methods import MergingMethod
 from diffusers import UNet2DConditionModel
+from .convert_diffusers_to_original_sdxl import (
+    convert_unet_state_dict,
+    convert_openai_text_enc_state_dict,
+    convert_openclip_text_enc_state_dict,
+)
 
 
 # Simple wrapper so that bare nn.Modules can be passed to ComfyUI's
@@ -133,11 +138,22 @@ class _SimpleWrapper:
     def state_dict_for_saving(self, clip_sd=None, vae_sd=None, clip_vision_sd=None):
         sd = {}
         if self._unet is not None:
-            for k, v in self._unet.state_dict().items():
-                sd[f"unet.{k}"] = v.to("cpu").half()
+            unet_sd = convert_unet_state_dict(self._unet.state_dict())
+            sd.update({f"model.diffusion_model.{k}": v.to("cpu").half() for k, v in unet_sd.items()})
+
         if self._clip is not None:
-            for k, v in self._clip.state_dict().items():
-                sd[f"text_encoder.{k}"] = v.to("cpu").half()
+            clip_state = self._clip.state_dict()
+            if any("text_projection" in k for k in clip_state):
+                enc_sd = convert_openclip_text_enc_state_dict(clip_state)
+                enc_sd = {f"conditioner.embedders.1.model.{k}": v.to("cpu").half() for k, v in enc_sd.items()}
+                tp_key = "conditioner.embedders.1.model.text_projection.weight"
+                if tp_key in enc_sd:
+                    enc_sd["conditioner.embedders.1.model.text_projection"] = enc_sd.pop(tp_key).T.contiguous()
+            else:
+                enc_sd = convert_openai_text_enc_state_dict(clip_state)
+                enc_sd = {f"conditioner.embedders.0.transformer.{k}": v.to("cpu").half() for k, v in enc_sd.items()}
+            sd.update(enc_sd)
+
         if clip_sd:
             sd.update({k: v.to("cpu").half() for k, v in clip_sd.items()})
         if vae_sd:
