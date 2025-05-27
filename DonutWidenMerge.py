@@ -52,6 +52,8 @@ class _SimpleWrapper:
         dummy.partially_load = self.partially_load
         dummy.model_load = self.model_load
         dummy.state_dict_for_saving = self.state_dict_for_saving
+        dummy.loaded_size = self.loaded_size
+        dummy.model_memory_required = self.model_memory_required
 
         self.model = dummy
         self.clip = getattr(dummy, "clip", None)
@@ -70,9 +72,9 @@ class _SimpleWrapper:
     def get_sd(self):
         sd = {}
         if self._unet is not None:
-            sd.update(self._unet.state_dict())
+            sd.update({f"unet.{k}": v for k, v in self._unet.state_dict().items()})
         if self._clip is not None:
-            sd.update({f"clip.{k}": v for k, v in self._clip.state_dict().items()})
+            sd.update({f"text_encoder.{k}": v for k, v in self._clip.state_dict().items()})
         return sd
 
     def current_loaded_device(self):
@@ -106,6 +108,21 @@ class _SimpleWrapper:
                     return param.dtype
         return torch.float32
 
+    def loaded_size(self):
+        """Return memory in bytes currently loaded on ``load_device``."""
+        size = 0
+        for mdl in (self._unet, self._clip):
+            if mdl is None:
+                continue
+            for p in mdl.parameters():
+                if p.device == self.load_device:
+                    size += p.nelement() * p.element_size()
+        return size
+
+    def model_memory_required(self, device):
+        """Approximate memory required if weights were on ``device``."""
+        return self.model_size()
+
     # ------------------------------------------------------------------
     # ComfyUI loader helpers
     # ------------------------------------------------------------------
@@ -121,13 +138,19 @@ class _SimpleWrapper:
 
     def state_dict_for_saving(self, clip_sd=None, vae_sd=None, clip_vision_sd=None):
         """Aggregate state dicts for saving via ``CheckpointSave``."""
-        sd = self.get_sd()
+        sd = {}
+        if self._unet is not None:
+            for k, v in self._unet.state_dict().items():
+                sd[f"unet.{k}"] = v.to("cpu").half()
+        if self._clip is not None:
+            for k, v in self._clip.state_dict().items():
+                sd[f"text_encoder.{k}"] = v.to("cpu").half()
         if clip_sd:
-            sd.update(clip_sd)
+            sd.update({k: v.to("cpu").half() for k, v in clip_sd.items()})
         if vae_sd:
-            sd.update(vae_sd)
+            sd.update({k: v.to("cpu").half() for k, v in vae_sd.items()})
         if clip_vision_sd:
-            sd.update(clip_vision_sd)
+            sd.update({k: v.to("cpu").half() for k, v in clip_vision_sd.items()})
         return sd
 
     def __getattr__(self, name):
