@@ -11,7 +11,7 @@ from diffusers import UNet2DConditionModel
 
 class _SimpleWrapper:
     def __init__(self, pipeline=None):
-        # 1) Unwrap ComfyUI MODEL → real Diffusers pipeline
+        """Wrap a pipeline or bare module so CheckpointSave can access all parts."""
         real_pipe = getattr(pipeline, "model", pipeline)
 
         # 2) Extract from the real pipeline, supporting bare modules
@@ -29,6 +29,7 @@ class _SimpleWrapper:
 
         self._vae = getattr(real_pipe, "vae", None)
         self._clip_vision = getattr(real_pipe, "text_encoder_2", None) or getattr(real_pipe, "clip_vision", None)
+
 
         # Determine original device
         first_param = None
@@ -233,6 +234,7 @@ class DonutWidenMergeUNet:
             if hasattr(base_pipe, "unet") and hasattr(base_pipe, "vae"):
                 base_pipe.unet = unets[0]
                 return (orig,)
+
             return (_SimpleWrapper(pipeline=orig),)
         except Exception:
             traceback.print_exc()
@@ -281,6 +283,7 @@ class DonutWidenMergeCLIP:
             if hasattr(base_pipe, "text_encoder") and hasattr(base_pipe, "vae"):
                 base_pipe.text_encoder = encs[0]
                 return (orig,)
+
             return (_SimpleWrapper(pipeline=orig),)
         except Exception:
             traceback.print_exc()
