@@ -11,14 +11,25 @@ from diffusers import UNet2DConditionModel
 
 class _SimpleWrapper:
     def __init__(self, pipeline=None):
-        # 1) Unwrap ComfyUI MODEL → real Diffusers pipeline
+        """Wrap a pipeline or bare module so CheckpointSave can access all parts."""
         real_pipe = getattr(pipeline, "model", pipeline)
 
-        # 2) Extract from the real pipeline
-        self._unet        = getattr(real_pipe, "unet", None) or getattr(real_pipe, "diffusion_model", None)
-        self._clip        = getattr(real_pipe, "text_encoder", None) or getattr(real_pipe, "clip", None)
-        self._vae         = getattr(real_pipe, "vae", None)
-        self._clip_vision = getattr(real_pipe, "text_encoder_2", None) or getattr(real_pipe, "clip_vision", None)
+        # Detect if a bare module was supplied
+        if isinstance(real_pipe, UNet2DConditionModel):
+            self._unet, self._clip = real_pipe, None
+            self._vae = self._clip_vision = None
+        elif isinstance(real_pipe, nn.Module) and not any(
+            hasattr(real_pipe, a)
+            for a in ("clip", "text_encoder", "text_encoder_1", "unet", "diffusion_model", "vae")
+        ):
+            # assume it is a text encoder-like module
+            self._clip, self._unet = real_pipe, None
+            self._vae = self._clip_vision = None
+        else:
+            self._unet        = getattr(real_pipe, "unet", None) or getattr(real_pipe, "diffusion_model", None)
+            self._clip        = getattr(real_pipe, "text_encoder", None) or getattr(real_pipe, "clip", None)
+            self._vae         = getattr(real_pipe, "vae", None)
+            self._clip_vision = getattr(real_pipe, "text_encoder_2", None) or getattr(real_pipe, "clip_vision", None)
 
         # Determine original device
         first_param = None
@@ -211,9 +222,13 @@ class DonutWidenMergeUNet:
                 )
             if isinstance(merged, dict) and merged:
                 unets[0].load_state_dict(merged, strict=False)
-            for u in unets: u.to(gpu)
+            for u in unets:
+                u.to(gpu)
             gc.collect()
 
+            base_pipe = getattr(orig, "model", orig)
+            if hasattr(base_pipe, "unet"):
+                base_pipe.unet = unets[0]
             return (_SimpleWrapper(pipeline=orig),)
         except Exception:
             traceback.print_exc()
@@ -254,9 +269,13 @@ class DonutWidenMergeCLIP:
                 )
             if isinstance(merged, dict) and merged:
                 encs[0].load_state_dict(merged, strict=False)
-            for c in encs: c.to(gpu)
+            for c in encs:
+                c.to(gpu)
             gc.collect()
 
+            base_pipe = getattr(orig, "model", orig)
+            if hasattr(base_pipe, "text_encoder"):
+                base_pipe.text_encoder = encs[0]
             return (_SimpleWrapper(pipeline=orig),)
         except Exception:
             traceback.print_exc()
