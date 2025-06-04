@@ -36,6 +36,15 @@ class DonutLoadCLIPModels:
                 safe_serialization=True,
             )
             clip = pipe.text_encoder
+
+            tok = getattr(pipe, "tokenizer", None) or getattr(pipe, "processor", None)
+            if tok is not None and hasattr(tok, "__call__"):
+                def _tok(text, **kw):
+                    out = tok(text, return_tensors="pt", **kw)
+                    return out["input_ids"] if isinstance(out, dict) else out
+                clip.tokenize = _tok
+                clip.tokenizer = tok
+
             # discard the rest
             del pipe.unet, pipe.scheduler, pipe.vae, pipe.text_encoder_2
             torch.cuda.empty_cache()
