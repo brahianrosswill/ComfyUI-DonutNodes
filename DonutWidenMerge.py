@@ -65,8 +65,28 @@ class _SimpleWrapper:
         dummy.model_load          = self.model_load
         dummy.model_memory_required = self.model_memory_required
 
+        tok_func = getattr(real_pipe, "tokenize", None)
+        if callable(tok_func):
+            dummy.tokenize = tok_func
+        else:
+            tok = getattr(real_pipe, "tokenizer", None) or getattr(real_pipe, "processor", None)
+            if tok is not None and hasattr(tok, "__call__"):
+                def _tok(text, **kw):
+                    out = tok(text, return_tensors="pt", **kw)
+                    return out["input_ids"] if isinstance(out, dict) else out
+                dummy.tokenize = _tok
+
+        dummy.clone = lambda: _SimpleWrapper(pipeline=pipeline)
 
         self.model = dummy
+
+    def tokenize(self, text, **kw):
+        if hasattr(self.model, "tokenize"):
+            return self.model.tokenize(text, **kw)
+        raise AttributeError(f"{type(self).__name__!r} has no attribute 'tokenize'")
+
+    def clone(self):
+        return _SimpleWrapper(pipeline=self.model.model)
 
     def model_load(self, lowvram_model_memory, force_patch_weights=False):
         # ComfyUI will call this to initialize model offloading/patching.
@@ -175,6 +195,20 @@ def _get_clip(wrapper):
     raise AttributeError(f"No CLIP encoder found on {type(mdl).__name__}")
 
 
+def _unwrap_pipeline(obj):
+    seen = set()
+    cur = obj
+    while True:
+        if id(cur) in seen:
+            break
+        seen.add(id(cur))
+        nxt = getattr(cur, "model", None)
+        if nxt is None or nxt is cur:
+            break
+        cur = nxt
+    return cur
+
+
 # ─── MERGE NODES ──────────────────────────────────────────────────────────────
 
 class DonutWidenMergeUNet:
@@ -211,9 +245,14 @@ class DonutWidenMergeUNet:
                 )
             if isinstance(merged, dict) and merged:
                 unets[0].load_state_dict(merged, strict=False)
-            for u in unets: u.to(gpu)
+            for u in unets:
+                u.to(gpu)
             gc.collect()
 
+            base_pipe = _unwrap_pipeline(orig)
+            if hasattr(base_pipe, "unet") and hasattr(base_pipe, "vae"):
+                base_pipe.unet = unets[0]
+                return (orig,)
             return (_SimpleWrapper(pipeline=orig),)
         except Exception:
             traceback.print_exc()
@@ -254,9 +293,14 @@ class DonutWidenMergeCLIP:
                 )
             if isinstance(merged, dict) and merged:
                 encs[0].load_state_dict(merged, strict=False)
-            for c in encs: c.to(gpu)
+            for c in encs:
+                c.to(gpu)
             gc.collect()
 
+            base_pipe = _unwrap_pipeline(orig)
+            if hasattr(base_pipe, "text_encoder") and hasattr(base_pipe, "vae"):
+                base_pipe.text_encoder = encs[0]
+                return (orig,)
             return (_SimpleWrapper(pipeline=orig),)
         except Exception:
             traceback.print_exc()
