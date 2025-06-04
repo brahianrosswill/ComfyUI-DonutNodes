@@ -30,6 +30,12 @@ class _SimpleWrapper:
         self._vae = getattr(real_pipe, "vae", None)
         self._clip_vision = getattr(real_pipe, "text_encoder_2", None) or getattr(real_pipe, "clip_vision", None)
 
+        if self._unet is None and isinstance(real_pipe, UNet2DConditionModel):
+            self._unet = real_pipe
+        if self._clip is None and isinstance(real_pipe, nn.Module) and self._unet is None:
+            # treat bare nn.Module as a clip encoder when not a unet
+            self._clip = real_pipe
+
 
         # Determine original device
         first_param = None
