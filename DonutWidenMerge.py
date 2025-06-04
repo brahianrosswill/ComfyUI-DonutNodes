@@ -66,11 +66,13 @@ class _SimpleWrapper:
         dummy.model_memory_required = self.model_memory_required
 
         tok_func = getattr(real_pipe, "tokenize", None)
+        self._tokenizer = None
         if callable(tok_func):
             dummy.tokenize = tok_func
         else:
             tok = getattr(real_pipe, "tokenizer", None) or getattr(real_pipe, "processor", None)
             if tok is not None and hasattr(tok, "__call__"):
+                self._tokenizer = tok
                 def _tok(text, **kw):
                     out = tok(text, return_tensors="pt", **kw)
                     return out["input_ids"] if isinstance(out, dict) else out
@@ -83,6 +85,9 @@ class _SimpleWrapper:
     def tokenize(self, text, **kw):
         if hasattr(self.model, "tokenize"):
             return self.model.tokenize(text, **kw)
+        if self._tokenizer is not None:
+            out = self._tokenizer(text, return_tensors="pt", **kw)
+            return out["input_ids"] if isinstance(out, dict) else out
         raise AttributeError(f"{type(self).__name__!r} has no attribute 'tokenize'")
 
     def clone(self):
@@ -250,9 +255,8 @@ class DonutWidenMergeUNet:
             gc.collect()
 
             base_pipe = _unwrap_pipeline(orig)
-            if hasattr(base_pipe, "unet") and hasattr(base_pipe, "vae"):
+            if hasattr(base_pipe, "unet"):
                 base_pipe.unet = unets[0]
-                return (orig,)
             return (_SimpleWrapper(pipeline=orig),)
         except Exception:
             traceback.print_exc()
@@ -298,9 +302,8 @@ class DonutWidenMergeCLIP:
             gc.collect()
 
             base_pipe = _unwrap_pipeline(orig)
-            if hasattr(base_pipe, "text_encoder") and hasattr(base_pipe, "vae"):
+            if hasattr(base_pipe, "text_encoder"):
                 base_pipe.text_encoder = encs[0]
-                return (orig,)
             return (_SimpleWrapper(pipeline=orig),)
         except Exception:
             traceback.print_exc()
