@@ -40,6 +40,26 @@ class _SimpleWrapper:
                     break
         self.load_device = getattr(first_param, "device", torch.device("cpu"))
 
+        tok_func = getattr(real_pipe, "tokenize", None)
+        if callable(tok_func):
+            dummy.tokenize = tok_func
+        else:
+            tok = getattr(real_pipe, "tokenizer", None) or getattr(real_pipe, "processor", None)
+            if tok is not None and hasattr(tok, "__call__"):
+                def _tok(text, **kw):
+                    out = tok(text, return_tensors="pt", **kw)
+                    return out["input_ids"] if isinstance(out, dict) else out
+                dummy.tokenize = _tok
+
+        dummy.clone = lambda: _SimpleWrapper(pipeline=pipeline)
+    def tokenize(self, text, **kw):
+        if hasattr(self.model, "tokenize"):
+            return self.model.tokenize(text, **kw)
+        raise AttributeError(f"{type(self).__name__!r} has no attribute 'tokenize'")
+
+    def clone(self):
+        return _SimpleWrapper(pipeline=self.model.model)
+
         # Build dummy model object
         dummy = type("SimplePipeline", (), {})()
         # expose the original pipeline so model_management can do self.model.model
@@ -150,8 +170,22 @@ class _SimpleWrapper:
         print(f"[SimpleWrapper] dumping {len(sd)} state_dict keys")
         return sd
 
-    def __getattr__(self, name):
-        # Avoid recursion during initialization
+def _unwrap_pipeline(obj):
+    seen = set()
+    cur = obj
+    while True:
+        if id(cur) in seen:
+            break
+        seen.add(id(cur))
+        nxt = getattr(cur, "model", None)
+        if nxt is None or nxt is cur:
+            break
+        cur = nxt
+    return cur
+
+
+            base_pipe = _unwrap_pipeline(orig)
+            base_pipe = _unwrap_pipeline(orig)
         if "model" not in self.__dict__:
             raise AttributeError(name)
 
