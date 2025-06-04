@@ -30,12 +30,6 @@ class _SimpleWrapper:
         self._vae = getattr(real_pipe, "vae", None)
         self._clip_vision = getattr(real_pipe, "text_encoder_2", None) or getattr(real_pipe, "clip_vision", None)
 
-        if self._unet is None and isinstance(real_pipe, UNet2DConditionModel):
-            self._unet = real_pipe
-        if self._clip is None and isinstance(real_pipe, nn.Module) and self._unet is None:
-            # treat bare nn.Module as a clip encoder when not a unet
-            self._clip = real_pipe
-
 
         # Determine original device
         first_param = None
@@ -81,6 +75,21 @@ class _SimpleWrapper:
         dummy.get_model_object      = self.get_model_object
         dummy.model_load          = self.model_load
         dummy.model_memory_required = self.model_memory_required
+        lf = getattr(pipeline, "latent_format", None)
+        if lf is None:
+            lf = getattr(real_pipe, "latent_format", None)
+        if lf is None:
+            try:
+                from comfy.sample.latent_format import LatentFormat
+                lf = LatentFormat(latent_channels=4, height=128, width=128)
+                setattr(lf, "latent_dimensions", 3)
+            except Exception:
+                class _LatentFormat:
+                    def __init__(self, latent_channels=4):
+                        self.latent_channels = latent_channels
+
+                lf = _LatentFormat()
+        dummy.latent_format = lf
 
         tok_func = getattr(real_pipe, "tokenize", None)
         self._tokenizer = None
@@ -94,6 +103,63 @@ class _SimpleWrapper:
                     out = tok(text, return_tensors="pt", **kw)
                     return out["input_ids"] if isinstance(out, dict) else out
                 dummy.tokenize = _tok
+
+
+        # ---- INJECT encode_from_tokens_scheduled -----------------------------
+        if hasattr(real_pipe, "encode_from_tokens_scheduled") and callable(real_pipe.encode_from_tokens_scheduled):
+            dummy.encode_from_tokens_scheduled = real_pipe.encode_from_tokens_scheduled
+        else:
+            def _get_ids_mask(toks):
+                if hasattr(toks, "input_ids"):
+                    ids = toks.input_ids
+                    mask = getattr(toks, "attention_mask", None)
+                    return ids, mask
+                if isinstance(toks, dict):
+                    return toks.get("input_ids"), toks.get("attention_mask")
+                return toks, None
+
+            def _ensure_tensors(ids, mask):
+                if ids is not None and not isinstance(ids, torch.Tensor):
+                    ids = torch.as_tensor(ids, device=self.load_device)
+                if mask is not None and not isinstance(mask, torch.Tensor):
+                    mask = torch.as_tensor(mask, device=self.load_device)
+                return ids, mask
+
+            if hasattr(real_pipe, "get_text_features") and callable(real_pipe.get_text_features):
+                def _via_get_text_features(tokens, **kw):
+                    ids, mask = _get_ids_mask(tokens)
+                    ids, mask = _ensure_tensors(ids, mask)
+                    if mask is not None:
+                        return real_pipe.get_text_features(input_ids=ids, attention_mask=mask, **kw)
+                    return real_pipe.get_text_features(input_ids=ids, **kw)
+                dummy.encode_from_tokens_scheduled = _via_get_text_features
+            elif hasattr(real_pipe, "encode") and callable(real_pipe.encode):
+                def _via_encode(tokens, **kw):
+                    ids, _ = _get_ids_mask(tokens)
+                    ids, _ = _ensure_tensors(ids, None)
+                    return real_pipe.encode(ids, **kw)
+                dummy.encode_from_tokens_scheduled = _via_encode
+            elif hasattr(real_pipe, "forward") and callable(real_pipe.forward):
+                def _via_forward(tokens, **kw):
+                    ids, mask = _get_ids_mask(tokens)
+                    ids, mask = _ensure_tensors(ids, mask)
+                    out = real_pipe.forward(input_ids=ids, attention_mask=mask, **kw)
+                    return out.last_hidden_state
+                dummy.encode_from_tokens_scheduled = _via_forward
+            elif hasattr(real_pipe, "__call__") and callable(real_pipe.__call__):
+                def _via_call(tokens, **kw):
+                    ids, mask = _get_ids_mask(tokens)
+                    ids, mask = _ensure_tensors(ids, mask)
+                    out = real_pipe(input_ids=ids, attention_mask=mask, **kw)
+                    return out.last_hidden_state
+                dummy.encode_from_tokens_scheduled = _via_call
+            else:
+                def _no_encode(tokens, **kw):
+                    raise AttributeError(
+                        f"{type(self).__name__!r} wrapped object has no 'encode_from_tokens_scheduled' or fallback encode method."
+                    )
+                dummy.encode_from_tokens_scheduled = _no_encode
+        # ----------------------------------------------------------------------
 
         dummy.clone = lambda: _SimpleWrapper(pipeline=pipeline)
 
