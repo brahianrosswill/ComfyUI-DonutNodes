@@ -20,6 +20,12 @@ class _SimpleWrapper:
         self._vae         = getattr(real_pipe, "vae", None)
         self._clip_vision = getattr(real_pipe, "text_encoder_2", None) or getattr(real_pipe, "clip_vision", None)
 
+        if self._unet is None and isinstance(real_pipe, UNet2DConditionModel):
+            self._unet = real_pipe
+        if self._clip is None and isinstance(real_pipe, nn.Module) and self._unet is None:
+            # treat bare nn.Module as a clip encoder when not a unet
+            self._clip = real_pipe
+
         # Determine original device
         first_param = None
         for mdl in (self._unet, self._clip, self._vae, self._clip_vision):
@@ -32,7 +38,7 @@ class _SimpleWrapper:
         # Build dummy model object
         dummy = type("SimplePipeline", (), {})()
         # expose the original pipeline so model_management can do self.model.model
-        dummy.model = pipeline
+        dummy.model = real_pipe
 
         # expose submodules on dummy
         if self._unet is not None:
@@ -65,8 +71,33 @@ class _SimpleWrapper:
         dummy.model_load          = self.model_load
         dummy.model_memory_required = self.model_memory_required
 
+        tok_func = getattr(real_pipe, "tokenize", None)
+        self._tokenizer = None
+        if callable(tok_func):
+            dummy.tokenize = tok_func
+        else:
+            tok = getattr(real_pipe, "tokenizer", None) or getattr(real_pipe, "processor", None)
+            if tok is not None and hasattr(tok, "__call__"):
+                self._tokenizer = tok
+                def _tok(text, **kw):
+                    out = tok(text, return_tensors="pt", **kw)
+                    return out["input_ids"] if isinstance(out, dict) else out
+                dummy.tokenize = _tok
+
+        dummy.clone = lambda: _SimpleWrapper(pipeline=pipeline)
 
         self.model = dummy
+
+    def tokenize(self, text, **kw):
+        if hasattr(self.model, "tokenize"):
+            return self.model.tokenize(text, **kw)
+        if self._tokenizer is not None:
+            out = self._tokenizer(text, return_tensors="pt", **kw)
+            return out["input_ids"] if isinstance(out, dict) else out
+        raise AttributeError(f"{type(self).__name__!r} has no attribute 'tokenize'")
+
+    def clone(self):
+        return _SimpleWrapper(pipeline=self.model.model)
 
     def model_load(self, lowvram_model_memory, force_patch_weights=False):
         # ComfyUI will call this to initialize model offloading/patching.
@@ -175,6 +206,20 @@ def _get_clip(wrapper):
     raise AttributeError(f"No CLIP encoder found on {type(mdl).__name__}")
 
 
+def _unwrap_pipeline(obj, _seen=None):
+    if _seen is None:
+        _seen = set()
+    if id(obj) in _seen:
+        return obj
+    _seen.add(id(obj))
+    if isinstance(obj, _SimpleWrapper):
+        return _unwrap_pipeline(obj.model, _seen)
+    nxt = getattr(obj, "model", None)
+    if nxt is not None and nxt is not obj:
+        return _unwrap_pipeline(nxt, _seen)
+    return obj
+
+
 # ─── MERGE NODES ──────────────────────────────────────────────────────────────
 
 class DonutWidenMergeUNet:
@@ -211,10 +256,14 @@ class DonutWidenMergeUNet:
                 )
             if isinstance(merged, dict) and merged:
                 unets[0].load_state_dict(merged, strict=False)
-            for u in unets: u.to(gpu)
+            for u in unets:
+                u.to(gpu)
             gc.collect()
 
-            return (_SimpleWrapper(pipeline=orig),)
+            base_pipe = _unwrap_pipeline(orig)
+            if hasattr(base_pipe, "unet"):
+                base_pipe.unet = unets[0]
+            return (_SimpleWrapper(pipeline=base_pipe),)
         except Exception:
             traceback.print_exc()
             raise
@@ -254,10 +303,14 @@ class DonutWidenMergeCLIP:
                 )
             if isinstance(merged, dict) and merged:
                 encs[0].load_state_dict(merged, strict=False)
-            for c in encs: c.to(gpu)
+            for c in encs:
+                c.to(gpu)
             gc.collect()
 
-            return (_SimpleWrapper(pipeline=orig),)
+            base_pipe = _unwrap_pipeline(orig)
+            if hasattr(base_pipe, "text_encoder"):
+                base_pipe.text_encoder = encs[0]
+            return (_SimpleWrapper(pipeline=base_pipe),)
         except Exception:
             traceback.print_exc()
             raise
