@@ -11,13 +11,23 @@ from diffusers import UNet2DConditionModel
 
 class _SimpleWrapper:
     def __init__(self, pipeline=None):
-        # 1) Unwrap ComfyUI MODEL → real Diffusers pipeline
+        """Wrap a pipeline or bare module so CheckpointSave can access all parts."""
         real_pipe = getattr(pipeline, "model", pipeline)
 
-        # 2) Extract from the real pipeline
-        self._unet        = getattr(real_pipe, "unet", None) or getattr(real_pipe, "diffusion_model", None)
-        self._clip        = getattr(real_pipe, "text_encoder", None) or getattr(real_pipe, "clip", None)
-        self._vae         = getattr(real_pipe, "vae", None)
+        # 2) Extract from the real pipeline, supporting bare modules
+        if isinstance(real_pipe, UNet2DConditionModel):
+            self._unet = real_pipe
+        else:
+            self._unet = getattr(real_pipe, "unet", None) or getattr(real_pipe, "diffusion_model", None)
+
+        if isinstance(real_pipe, nn.Module) and self._unet is None and not any(
+            hasattr(real_pipe, a) for a in ("clip", "text_encoder", "text_encoder_2", "vae")
+        ):
+            self._clip = real_pipe
+        else:
+            self._clip = getattr(real_pipe, "text_encoder", None) or getattr(real_pipe, "clip", None)
+
+        self._vae = getattr(real_pipe, "vae", None)
         self._clip_vision = getattr(real_pipe, "text_encoder_2", None) or getattr(real_pipe, "clip_vision", None)
 
         if self._unet is None and isinstance(real_pipe, UNet2DConditionModel):
@@ -25,6 +35,7 @@ class _SimpleWrapper:
         if self._clip is None and isinstance(real_pipe, nn.Module) and self._unet is None:
             # treat bare nn.Module as a clip encoder when not a unet
             self._clip = real_pipe
+
 
         # Determine original device
         first_param = None
@@ -171,6 +182,10 @@ class _SimpleWrapper:
         return sd
 
     def __getattr__(self, name):
+        # Avoid recursion during initialization
+        if "model" not in self.__dict__:
+            raise AttributeError(name)
+
         # fallback to dummy.model first
         if hasattr(self.model, name):
             return getattr(self.model, name)
@@ -264,6 +279,7 @@ class DonutWidenMergeUNet:
             if hasattr(base_pipe, "unet"):
                 base_pipe.unet = unets[0]
             return (_SimpleWrapper(pipeline=base_pipe),)
+
         except Exception:
             traceback.print_exc()
             raise
@@ -311,6 +327,7 @@ class DonutWidenMergeCLIP:
             if hasattr(base_pipe, "text_encoder"):
                 base_pipe.text_encoder = encs[0]
             return (_SimpleWrapper(pipeline=base_pipe),)
+
         except Exception:
             traceback.print_exc()
             raise
