@@ -32,7 +32,7 @@ class _SimpleWrapper:
         # Build dummy model object
         dummy = type("SimplePipeline", (), {})()
         # expose the original pipeline so model_management can do self.model.model
-        dummy.model = pipeline
+        dummy.model = real_pipe
 
         # expose submodules on dummy
         if self._unet is not None:
@@ -200,18 +200,18 @@ def _get_clip(wrapper):
     raise AttributeError(f"No CLIP encoder found on {type(mdl).__name__}")
 
 
-def _unwrap_pipeline(obj):
-    seen = set()
-    cur = obj
-    while True:
-        if id(cur) in seen:
-            break
-        seen.add(id(cur))
-        nxt = getattr(cur, "model", None)
-        if nxt is None or nxt is cur:
-            break
-        cur = nxt
-    return cur
+def _unwrap_pipeline(obj, _seen=None):
+    if _seen is None:
+        _seen = set()
+    if id(obj) in _seen:
+        return obj
+    _seen.add(id(obj))
+    if isinstance(obj, _SimpleWrapper):
+        return _unwrap_pipeline(obj.model, _seen)
+    nxt = getattr(obj, "model", None)
+    if nxt is not None and nxt is not obj:
+        return _unwrap_pipeline(nxt, _seen)
+    return obj
 
 
 # ─── MERGE NODES ──────────────────────────────────────────────────────────────
@@ -257,7 +257,7 @@ class DonutWidenMergeUNet:
             base_pipe = _unwrap_pipeline(orig)
             if hasattr(base_pipe, "unet"):
                 base_pipe.unet = unets[0]
-            return (_SimpleWrapper(pipeline=orig),)
+            return (_SimpleWrapper(pipeline=base_pipe),)
         except Exception:
             traceback.print_exc()
             raise
@@ -304,7 +304,7 @@ class DonutWidenMergeCLIP:
             base_pipe = _unwrap_pipeline(orig)
             if hasattr(base_pipe, "text_encoder"):
                 base_pipe.text_encoder = encs[0]
-            return (_SimpleWrapper(pipeline=orig),)
+            return (_SimpleWrapper(pipeline=base_pipe),)
         except Exception:
             traceback.print_exc()
             raise
