@@ -36,9 +36,14 @@ class MergingMethod:
         exclude_param_names_regex: list,
         above_average_value_ratio: float = 1.0,
         score_calibration_value: float = 1.0,
+        min_merge_percent: float = 0.0,
     ):
         device = self._choose_device()
         print(f"[{self.method}] merging on {device}")
+
+        # initialize the dictionary that will hold the merged weights early so
+        # it always exists even if an exception occurs later in the method
+        merged_params = {}
 
         pre_params = {n: p.detach().to(device=device, dtype=torch.float32).clone()
                       for n, p in merged_model.named_parameters()}
@@ -62,15 +67,22 @@ class MergingMethod:
         ]
 
         def compute_mag_dir(param_dict, desc):
+            """Return magnitude and direction for every non-scalar tensor."""
             mags, dirs = {}, {}
             for name, tensor in tqdm(param_dict.items(), desc=desc):
                 try:
-                    if tensor.dim() < 1:
+                    if tensor.numel() < 2:
                         continue
-                    flat = tensor.view(tensor.shape[0], -1) if tensor.dim() == 4 else tensor
+                    if tensor.ndim == 1:
+                        flat = tensor.unsqueeze(0)
+                    else:
+                        flat = tensor.view(tensor.shape[0], -1)
                     mag = flat.norm(dim=0)
                     dir = flat / (mag.unsqueeze(0) + 1e-8)
-                    dirs[name] = dir.view(tensor.shape) if tensor.dim()==4 else dir
+                    if tensor.ndim > 1:
+                        dirs[name] = dir.view(tensor.shape)
+                    else:
+                        dirs[name] = dir.squeeze(0)
                     mags[name] = mag
                 except Exception:
                     continue
@@ -86,9 +98,12 @@ class MergingMethod:
             diff_list.append((mag_diff, dir_diff))
 
         def rank_sig(diff: torch.Tensor):
-            if diff.ndim != 2: raise IndexError
-            n,dim = diff.shape
-            flat = diff.reshape(n,-1)
+            if diff.ndim == 1:
+                diff = diff.unsqueeze(0)
+            elif diff.ndim > 2:
+                diff = diff.view(diff.shape[0], -1)
+            n, dim = diff.shape
+            flat = diff.reshape(n, -1)
             idx = torch.argsort(flat, dim=1)
             L = flat.shape[1]
             sig = torch.arange(L, device=flat.device)/L
@@ -107,17 +122,31 @@ class MergingMethod:
                 ms = importance(mag_rank)
                 ds = importance(dir_rank)
                 w = 0.5 * (ms + ds)
-                w = w.view(delta.shape[0], *([1]*(delta.dim()-2)), delta.shape[-1])
-                merged = base + (delta * w).sum(0)
-                return merged if merged.shape == base.shape else base
+                flat_delta = delta.view(delta.shape[0], -1)
+                w = w.view(delta.shape[0], -1)
+                merged = base.view(-1) + (flat_delta * w).sum(0)
+                merged = merged.view_as(base)
+                return merged
             except Exception:
-                return base
+                return None
 
-        merged_params = {}
         fell_back = 0
         common = set(pre_mag.keys())
         for tv in task_vectors:
             common &= set(tv.task_vector_param_dict.keys())
+
+        # determine parameters to force merge
+        importance_scores = {}
+        for name in common:
+            score_sum = 0.0
+            for mag_diff, dir_diff in diff_list:
+                if name in mag_diff and name in dir_diff:
+                    score_sum += mag_diff[name].mean().item() + dir_diff[name].mean().item()
+            importance_scores[name] = score_sum
+
+        sorted_names = sorted(importance_scores.items(), key=lambda x: -x[1])
+        min_merge_count = int(len(sorted_names) * min_merge_percent)
+        forced_merge_set = set(n for n, _ in sorted_names[:min_merge_count])
 
         for name in tqdm(common, desc=f"[{self.method}] merging"):
             try:
@@ -131,8 +160,13 @@ class MergingMethod:
                 fell_back += 1
                 continue
             merged = merge_param(delta, pre_params[name], rankm, rankd)
-            merged_params[name] = merged
-            if torch.allclose(merged, pre_params[name]):
+            if merged is None or torch.isnan(merged).any():
+                merged_params[name] = pre_params[name]
+                fell_back += 1
+            elif name in forced_merge_set or not torch.allclose(merged, pre_params[name]):
+                merged_params[name] = merged
+            else:
+                merged_params[name] = pre_params[name]
                 fell_back += 1
 
         total = len(common)
@@ -151,6 +185,7 @@ class DonutWidenMergeUNet:
                 "model_other": ("MODEL",),
                 "above_average_value_ratio": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
                 "score_calibration_value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+                "min_merge_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
             }
         }
 
@@ -158,7 +193,7 @@ class DonutWidenMergeUNet:
     FUNCTION = "execute"
     CATEGORY = "donut"
 
-    def execute(self, model_base, model_other, above_average_value_ratio, score_calibration_value):
+    def execute(self, model_base, model_other, above_average_value_ratio, score_calibration_value, min_merge_percent):
         base_state = model_base.model.state_dict()
         other_state = model_other.model.state_dict()
         diffs = [
@@ -172,13 +207,15 @@ class DonutWidenMergeUNet:
         print(f"[WidenMergeUNet] Different parameters: {len(diffs)} / {len(base_state)}")
 
         merging = MergingMethod("WidenMergeUNet")
+
         merged_params = merging.widen_merging(
             merged_model=model_base.model,
             models_to_merge=[model_other.model],
             exclude_param_names_regex=[],
             above_average_value_ratio=above_average_value_ratio,
             score_calibration_value=score_calibration_value,
-        )
+            min_merge_percent=min_merge_percent,
+        ) or {}
         model_base.model.load_state_dict(merged_params, strict=False)
         return (model_base,)
 
@@ -193,6 +230,7 @@ class DonutWidenMergeCLIP:
                 "clip_other": ("CLIP",),
                 "above_average_value_ratio": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
                 "score_calibration_value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+                "min_merge_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
             }
         }
 
@@ -200,7 +238,7 @@ class DonutWidenMergeCLIP:
     FUNCTION = "execute"
     CATEGORY = "donut"
 
-    def execute(self, clip_base, clip_other, above_average_value_ratio, score_calibration_value):
+    def execute(self, clip_base, clip_other, above_average_value_ratio, score_calibration_value, min_merge_percent):
         base_state = clip_base.cond_stage_model.state_dict()
         other_state = clip_other.cond_stage_model.state_dict()
         diffs = [
@@ -220,6 +258,7 @@ class DonutWidenMergeCLIP:
             exclude_param_names_regex=[],
             above_average_value_ratio=above_average_value_ratio,
             score_calibration_value=score_calibration_value,
+            min_merge_percent=min_merge_percent,
         )
         clip_base.cond_stage_model.load_state_dict(merged_params, strict=False)
         return (clip_base,)
