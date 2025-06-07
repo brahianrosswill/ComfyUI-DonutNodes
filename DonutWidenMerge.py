@@ -3,6 +3,9 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+# use package-relative path for ComfyUI
+from .utils.sdxl_safetensors import ensure_same_device
+
 # Dummy placeholders for required utility classes that should be part of the node
 class TaskVector:
     def __init__(self, base_model, finetuned_model, exclude_param_names_regex):
@@ -37,12 +40,21 @@ class MergingMethod:
         device = self._choose_device()
         print(f"[{self.method}] merging on {device}")
 
-        pre_params = {n: p.detach().cpu().float().clone()
+        pre_params = {n: p.detach().to(device=device, dtype=torch.float32).clone()
                       for n, p in merged_model.named_parameters()}
         finetuned_dicts = [
-            {n: p.detach().cpu().float().clone() for n, p in m.named_parameters()}
+            {n: p.detach().to(device=device, dtype=torch.float32).clone()
+             for n, p in m.named_parameters()}
             for m in models_to_merge
         ]
+
+        def transpose_tok(d):
+            if "model.embed_tokens.weight" in d:
+                d["model.embed_tokens.weight"] = d["model.embed_tokens.weight"].T
+
+        transpose_tok(pre_params)
+        for d in finetuned_dicts:
+            transpose_tok(d)
 
         task_vectors = [
             TaskVector(merged_model, m, exclude_param_names_regex)
@@ -125,6 +137,7 @@ class MergingMethod:
 
         total = len(common)
         print(f"[{self.method}] merged {total - fell_back} / {total} parameters")
+        merged_params = ensure_same_device(merged_params, "cpu")
         return merged_params
 
 
