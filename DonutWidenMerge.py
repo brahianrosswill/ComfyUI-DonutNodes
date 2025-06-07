@@ -67,15 +67,22 @@ class MergingMethod:
         ]
 
         def compute_mag_dir(param_dict, desc):
+            """Return magnitude and direction for every non-scalar tensor."""
             mags, dirs = {}, {}
             for name, tensor in tqdm(param_dict.items(), desc=desc):
                 try:
-                    if tensor.dim() < 1:
+                    if tensor.numel() < 2:
                         continue
-                    flat = tensor.view(tensor.shape[0], -1) if tensor.dim() == 4 else tensor
+                    if tensor.ndim == 1:
+                        flat = tensor.unsqueeze(0)
+                    else:
+                        flat = tensor.view(tensor.shape[0], -1)
                     mag = flat.norm(dim=0)
                     dir = flat / (mag.unsqueeze(0) + 1e-8)
-                    dirs[name] = dir.view(tensor.shape) if tensor.dim()==4 else dir
+                    if tensor.ndim > 1:
+                        dirs[name] = dir.view(tensor.shape)
+                    else:
+                        dirs[name] = dir.squeeze(0)
                     mags[name] = mag
                 except Exception:
                     continue
@@ -91,9 +98,12 @@ class MergingMethod:
             diff_list.append((mag_diff, dir_diff))
 
         def rank_sig(diff: torch.Tensor):
-            if diff.ndim != 2: raise IndexError
-            n,dim = diff.shape
-            flat = diff.reshape(n,-1)
+            if diff.ndim == 1:
+                diff = diff.unsqueeze(0)
+            elif diff.ndim > 2:
+                diff = diff.view(diff.shape[0], -1)
+            n, dim = diff.shape
+            flat = diff.reshape(n, -1)
             idx = torch.argsort(flat, dim=1)
             L = flat.shape[1]
             sig = torch.arange(L, device=flat.device)/L
@@ -112,11 +122,13 @@ class MergingMethod:
                 ms = importance(mag_rank)
                 ds = importance(dir_rank)
                 w = 0.5 * (ms + ds)
-                w = w.view(delta.shape[0], *([1]*(delta.dim()-2)), delta.shape[-1])
-                merged = base + (delta * w).sum(0)
-                return merged if merged.shape == base.shape else base
+                flat_delta = delta.view(delta.shape[0], -1)
+                w = w.view(delta.shape[0], -1)
+                merged = base.view(-1) + (flat_delta * w).sum(0)
+                merged = merged.view_as(base)
+                return merged
             except Exception:
-                return base
+                return None
 
         fell_back = 0
         common = set(pre_mag.keys())
@@ -148,7 +160,10 @@ class MergingMethod:
                 fell_back += 1
                 continue
             merged = merge_param(delta, pre_params[name], rankm, rankd)
-            if name in forced_merge_set or not torch.allclose(merged, pre_params[name]):
+            if merged is None or torch.isnan(merged).any():
+                merged_params[name] = pre_params[name]
+                fell_back += 1
+            elif name in forced_merge_set or not torch.allclose(merged, pre_params[name]):
                 merged_params[name] = merged
             else:
                 merged_params[name] = pre_params[name]
