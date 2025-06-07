@@ -174,13 +174,13 @@ class DonutWidenMergeCLIP:
     def execute(self, clip_base, clip_other, above_average_value_ratio, score_calibration_value):
         merging = MergingMethod("WidenMergeCLIP")
         merged_params = merging.widen_merging(
-            merged_model=clip_base.model,
-            models_to_merge=[clip_other.model],
+            merged_model=clip_base.cond_stage_model,
+            models_to_merge=[clip_other.cond_stage_model],
             exclude_param_names_regex=[],
             above_average_value_ratio=above_average_value_ratio,
             score_calibration_value=score_calibration_value,
         )
-        clip_base.model.load_state_dict(merged_params, strict=False)
+        clip_base.cond_stage_model.load_state_dict(merged_params, strict=False)
         return (clip_base,)
 
 
