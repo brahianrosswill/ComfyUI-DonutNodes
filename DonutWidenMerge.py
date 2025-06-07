@@ -11,6 +11,7 @@ class TaskVector:
             for k in base_model.state_dict()
             if k in finetuned_model.state_dict()
         }
+        print(f"[TaskVector] param count: {len(self.task_vector_param_dict)}")
 
 class MergingMethod:
     def __init__(self, merging_method_name: str, vram_limit_bytes: int = None):
@@ -52,7 +53,8 @@ class MergingMethod:
             mags, dirs = {}, {}
             for name, tensor in tqdm(param_dict.items(), desc=desc):
                 try:
-                    if tensor.dim() not in (2,4): continue
+                    if tensor.dim() < 1:
+                        continue
                     flat = tensor.view(tensor.shape[0], -1) if tensor.dim() == 4 else tensor
                     mag = flat.norm(dim=0)
                     dir = flat / (mag.unsqueeze(0) + 1e-8)
@@ -127,6 +129,7 @@ class MergingMethod:
 
 
 class DonutWidenMergeUNet:
+    class_type = "MODEL"
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -143,6 +146,18 @@ class DonutWidenMergeUNet:
     CATEGORY = "donut"
 
     def execute(self, model_base, model_other, above_average_value_ratio, score_calibration_value):
+        base_state = model_base.model.state_dict()
+        other_state = model_other.model.state_dict()
+        diffs = [
+            k
+            for k in base_state
+            if k in other_state
+            and not torch.equal(
+                base_state[k].detach().cpu(), other_state[k].detach().cpu()
+            )
+        ]
+        print(f"[WidenMergeUNet] Different parameters: {len(diffs)} / {len(base_state)}")
+
         merging = MergingMethod("WidenMergeUNet")
         merged_params = merging.widen_merging(
             merged_model=model_base.model,
@@ -156,6 +171,7 @@ class DonutWidenMergeUNet:
 
 
 class DonutWidenMergeCLIP:
+    class_type = "CLIP"
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -172,15 +188,27 @@ class DonutWidenMergeCLIP:
     CATEGORY = "donut"
 
     def execute(self, clip_base, clip_other, above_average_value_ratio, score_calibration_value):
+        base_state = clip_base.cond_stage_model.state_dict()
+        other_state = clip_other.cond_stage_model.state_dict()
+        diffs = [
+            k
+            for k in base_state
+            if k in other_state
+            and not torch.equal(
+                base_state[k].detach().cpu(), other_state[k].detach().cpu()
+            )
+        ]
+        print(f"[WidenMergeCLIP] Different parameters: {len(diffs)} / {len(base_state)}")
+
         merging = MergingMethod("WidenMergeCLIP")
         merged_params = merging.widen_merging(
-            merged_model=clip_base.model,
-            models_to_merge=[clip_other.model],
+            merged_model=clip_base.cond_stage_model,
+            models_to_merge=[clip_other.cond_stage_model],
             exclude_param_names_regex=[],
             above_average_value_ratio=above_average_value_ratio,
             score_calibration_value=score_calibration_value,
         )
-        clip_base.model.load_state_dict(merged_params, strict=False)
+        clip_base.cond_stage_model.load_state_dict(merged_params, strict=False)
         return (clip_base,)
 
 
