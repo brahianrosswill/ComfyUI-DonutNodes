@@ -1,411 +1,190 @@
-import traceback
-import gc
 
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from .merging_methods import MergingMethod
-from diffusers import UNet2DConditionModel
+# Dummy placeholders for required utility classes that should be part of the node
+class TaskVector:
+    def __init__(self, base_model, finetuned_model, exclude_param_names_regex):
+        self.task_vector_param_dict = {
+            k: finetuned_model.state_dict()[k] - base_model.state_dict()[k]
+            for k in base_model.state_dict()
+            if k in finetuned_model.state_dict()
+        }
 
+class MergingMethod:
+    def __init__(self, merging_method_name: str, vram_limit_bytes: int = None):
+        self.method = merging_method_name
+        self.vram_limit = vram_limit_bytes
 
-class _SimpleWrapper:
-    def __init__(self, pipeline=None):
-        """Wrap a pipeline or bare module so CheckpointSave can access all parts."""
-        real_pipe = getattr(pipeline, "model", pipeline)
+    def _choose_device(self):
+        if torch.cuda.is_available() and self.vram_limit is not None:
+            dev = torch.cuda.current_device()
+            free, _ = torch.cuda.mem_get_info(dev)
+            if free >= self.vram_limit:
+                return torch.device("cuda")
+        return torch.device("cpu")
 
-        # 2) Extract from the real pipeline, supporting bare modules
-        if isinstance(real_pipe, UNet2DConditionModel):
-            self._unet = real_pipe
-        else:
-            self._unet = getattr(real_pipe, "unet", None) or getattr(real_pipe, "diffusion_model", None)
+    def widen_merging(
+        self,
+        merged_model: nn.Module,
+        models_to_merge: list,
+        exclude_param_names_regex: list,
+        above_average_value_ratio: float = 1.0,
+        score_calibration_value: float = 1.0,
+    ):
+        device = self._choose_device()
+        print(f"[{self.method}] merging on {device}")
 
-        if isinstance(real_pipe, nn.Module) and self._unet is None and not any(
-            hasattr(real_pipe, a) for a in ("clip", "text_encoder", "text_encoder_2", "vae")
-        ):
-            self._clip = real_pipe
-        else:
-            self._clip = getattr(real_pipe, "text_encoder", None) or getattr(real_pipe, "clip", None)
+        pre_params = {n: p.detach().cpu().float().clone()
+                      for n, p in merged_model.named_parameters()}
+        finetuned_dicts = [
+            {n: p.detach().cpu().float().clone() for n, p in m.named_parameters()}
+            for m in models_to_merge
+        ]
 
-        self._vae = getattr(real_pipe, "vae", None)
-        self._clip_vision = getattr(real_pipe, "text_encoder_2", None) or getattr(real_pipe, "clip_vision", None)
+        task_vectors = [
+            TaskVector(merged_model, m, exclude_param_names_regex)
+            for m in models_to_merge
+        ]
 
-
-        # Determine original device
-        first_param = None
-        for mdl in (self._unet, self._clip, self._vae, self._clip_vision):
-            if mdl is not None:
-                first_param = next(iter(mdl.parameters()), None)
-                if first_param is not None:
-                    break
-        self.load_device = getattr(first_param, "device", torch.device("cpu"))
-
-        # Build dummy model object
-        dummy = type("SimplePipeline", (), {})()
-        # expose the original pipeline so model_management can do self.model.model
-        dummy.model = real_pipe
-
-        # expose submodules on dummy
-        if self._unet is not None:
-            dummy.unet = self._unet
-            dummy.diffusion_model = self._unet
-        if self._clip is not None:
-            dummy.clip = self._clip
-            dummy.text_encoder = self._clip
-            dummy.text_encoder_1 = self._clip
-        if self._vae is not None:
-            dummy.vae = self._vae
-        if self._clip_vision is not None:
-            dummy.clip_vision = self._clip_vision
-
-        # expose the attributes CheckpointSave needs:
-        dummy.parent          = getattr(pipeline, "parent", None)
-        dummy.model_type      = getattr(pipeline, "model_type", None)
-        dummy.model_sampling  = getattr(pipeline, "model_sampling", None)
-        dummy.load_device     = self.load_device
-        dummy.current_loaded_device = lambda: self.load_device
-        dummy.model_size      = self.model_size
-        dummy.loaded_size     = self.loaded_size
-        dummy.model_patches_to= self.model_patches_to
-        dummy.get_sd          = self.get_sd
-        dummy.load_model      = lambda: dummy
-        dummy.model_dtype     = self.model_dtype
-        dummy.partially_load  = self.partially_load
-        dummy.state_dict_for_saving = self.state_dict_for_saving
-        dummy.get_model_object      = self.get_model_object
-        dummy.model_load          = self.model_load
-        dummy.model_memory_required = self.model_memory_required
-        lf = getattr(pipeline, "latent_format", None)
-        if lf is None:
-            lf = getattr(real_pipe, "latent_format", None)
-        if lf is None:
-            try:
-                from comfy.sample.latent_format import LatentFormat
-                lf = LatentFormat(latent_channels=4, height=128, width=128)
-                setattr(lf, "latent_dimensions", 3)
-            except Exception:
-                class _LatentFormat:
-                    def __init__(self, latent_channels=4):
-                        self.latent_channels = latent_channels
-
-                lf = _LatentFormat()
-        dummy.latent_format = lf
-
-        tok_func = getattr(real_pipe, "tokenize", None)
-        self._tokenizer = None
-        if callable(tok_func):
-            dummy.tokenize = tok_func
-        else:
-            tok = getattr(real_pipe, "tokenizer", None) or getattr(real_pipe, "processor", None)
-            if tok is not None and hasattr(tok, "__call__"):
-                self._tokenizer = tok
-                def _tok(text, **kw):
-                    out = tok(text, return_tensors="pt", **kw)
-                    return out["input_ids"] if isinstance(out, dict) else out
-                dummy.tokenize = _tok
-
-
-        # ---- INJECT encode_from_tokens_scheduled -----------------------------
-        if hasattr(real_pipe, "encode_from_tokens_scheduled") and callable(real_pipe.encode_from_tokens_scheduled):
-            dummy.encode_from_tokens_scheduled = real_pipe.encode_from_tokens_scheduled
-        else:
-            def _get_ids_mask(toks):
-                if hasattr(toks, "input_ids"):
-                    ids = toks.input_ids
-                    mask = getattr(toks, "attention_mask", None)
-                    return ids, mask
-                if isinstance(toks, dict):
-                    return toks.get("input_ids"), toks.get("attention_mask")
-                return toks, None
-
-            def _ensure_tensors(ids, mask):
-                if ids is not None and not isinstance(ids, torch.Tensor):
-                    ids = torch.as_tensor(ids, device=self.load_device)
-                if mask is not None and not isinstance(mask, torch.Tensor):
-                    mask = torch.as_tensor(mask, device=self.load_device)
-                return ids, mask
-
-            if hasattr(real_pipe, "get_text_features") and callable(real_pipe.get_text_features):
-                def _via_get_text_features(tokens, **kw):
-                    ids, mask = _get_ids_mask(tokens)
-                    ids, mask = _ensure_tensors(ids, mask)
-                    if mask is not None:
-                        return real_pipe.get_text_features(input_ids=ids, attention_mask=mask, **kw)
-                    return real_pipe.get_text_features(input_ids=ids, **kw)
-                dummy.encode_from_tokens_scheduled = _via_get_text_features
-            elif hasattr(real_pipe, "encode") and callable(real_pipe.encode):
-                def _via_encode(tokens, **kw):
-                    ids, _ = _get_ids_mask(tokens)
-                    ids, _ = _ensure_tensors(ids, None)
-                    return real_pipe.encode(ids, **kw)
-                dummy.encode_from_tokens_scheduled = _via_encode
-            elif hasattr(real_pipe, "forward") and callable(real_pipe.forward):
-                def _via_forward(tokens, **kw):
-                    ids, mask = _get_ids_mask(tokens)
-                    ids, mask = _ensure_tensors(ids, mask)
-                    out = real_pipe.forward(input_ids=ids, attention_mask=mask, **kw)
-                    return out.last_hidden_state
-                dummy.encode_from_tokens_scheduled = _via_forward
-            elif hasattr(real_pipe, "__call__") and callable(real_pipe.__call__):
-                def _via_call(tokens, **kw):
-                    ids, mask = _get_ids_mask(tokens)
-                    ids, mask = _ensure_tensors(ids, mask)
-                    out = real_pipe(input_ids=ids, attention_mask=mask, **kw)
-                    return out.last_hidden_state
-                dummy.encode_from_tokens_scheduled = _via_call
-            else:
-                def _no_encode(tokens, **kw):
-                    raise AttributeError(
-                        f"{type(self).__name__!r} wrapped object has no 'encode_from_tokens_scheduled' or fallback encode method."
-                    )
-                dummy.encode_from_tokens_scheduled = _no_encode
-        # ----------------------------------------------------------------------
-
-        dummy.clone = lambda: _SimpleWrapper(pipeline=pipeline)
-
-        self.model = dummy
-
-    def tokenize(self, text, **kw):
-        if hasattr(self.model, "tokenize"):
-            return self.model.tokenize(text, **kw)
-        if self._tokenizer is not None:
-            out = self._tokenizer(text, return_tensors="pt", **kw)
-            return out["input_ids"] if isinstance(out, dict) else out
-        raise AttributeError(f"{type(self).__name__!r} has no attribute 'tokenize'")
-
-    def clone(self):
-        return _SimpleWrapper(pipeline=self.model.model)
-
-    def model_load(self, lowvram_model_memory, force_patch_weights=False):
-        # ComfyUI will call this to initialize model offloading/patching.
-        # Simplest is to re-wrap everything on CPU or GPU as needed:
-        return self.model_patches_to(self.load_device)
-
-    def model_memory_required(self, device):
-        # Used by ComfyUI to budget VRAM.
-        # Return how much memory (in bytes) the *rest* of the model needs when offloaded.
-        # A simple approximation is total size minus what’s already “loaded”:
-        return self.model_size() - self.loaded_size()
-
-    def get_model_object(self, name=None):
-        if name is None:
-            return self.model
-        return getattr(self.model, name, None)
-
-    def model_size(self):
-        total = 0
-        for mdl in (self._unet, self._clip, self._vae, self._clip_vision):
-            if mdl is not None:
-                total += sum(p.nelement() * p.element_size() for p in mdl.parameters())
-        return total
-
-    def loaded_size(self):
-        # mirror of model_size
-        return self.model_size()
-
-    def model_patches_to(self, device):
-        for mdl in (self._unet, self._clip, self._vae, self._clip_vision):
-            if mdl is not None:
-                mdl.to(device)
-        self.load_device = device
-        self.model.load_device = device
-        return self
-
-    def model_dtype(self):
-        for mdl in (self._unet, self._clip, self._vae, self._clip_vision):
-            if mdl is not None:
+        def compute_mag_dir(param_dict, desc):
+            mags, dirs = {}, {}
+            for name, tensor in tqdm(param_dict.items(), desc=desc):
                 try:
-                    p = next(iter(mdl.parameters()))
-                except StopIteration:
+                    if tensor.dim() not in (2,4): continue
+                    flat = tensor.view(tensor.shape[0], -1) if tensor.dim() == 4 else tensor
+                    mag = flat.norm(dim=0)
+                    dir = flat / (mag.unsqueeze(0) + 1e-8)
+                    dirs[name] = dir.view(tensor.shape) if tensor.dim()==4 else dir
+                    mags[name] = mag
+                except Exception:
                     continue
-                return p.dtype
-        return torch.float32
+            return mags, dirs
 
-    def partially_load(self, device, extra_memory, force_patch_weights=False):
-        # minimal stub: just move everything to device
-        return self.model_patches_to(device)
+        pre_mag, pre_dir = compute_mag_dir(pre_params, "[mag/dir] pretrained")
+        diff_list = []
+        for fin in finetuned_dicts:
+            fin_mag, fin_dir = compute_mag_dir(fin, "[mag/dir] finetuned")
+            mag_diff = {k:(fin_mag[k] - pre_mag[k]).abs() for k in pre_mag if k in fin_mag}
+            dir_diff = {k:1 - torch.cosine_similarity(fin_dir[k], pre_dir[k], dim=0)
+                        for k in pre_dir if k in fin_dir}
+            diff_list.append((mag_diff, dir_diff))
 
-    def get_sd(self):
-        # not used by CheckpointSave but present
-        return {}
+        def rank_sig(diff: torch.Tensor):
+            if diff.ndim != 2: raise IndexError
+            n,dim = diff.shape
+            flat = diff.reshape(n,-1)
+            idx = torch.argsort(flat, dim=1)
+            L = flat.shape[1]
+            sig = torch.arange(L, device=flat.device)/L
+            base = sig.unsqueeze(0).repeat(n,1)
+            return base.scatter(1, idx, sig)
 
-    def state_dict_for_saving(self, clip_sd=None, vae_sd=None, clip_vision_sd=None):
-        sd = {}
-        if self._unet:
-            for k, v in self._unet.state_dict().items():
-                sd[f"model.diffusion_model.{k}"] = v.half().cpu()
-        if self._vae:
-            for k, v in self._vae.state_dict().items():
-                sd[f"first_stage_model.{k}"] = v.half().cpu()
-        if self._clip:
-            for k, v in self._clip.state_dict().items():
-                sd[f"conditioner.embedders.0.transformer.{k}"] = v.half().cpu()
-        if self._clip_vision:
-            for k, v in self._clip_vision.state_dict().items():
-                sd[f"conditioner.embedders.1.model.{k}"] = v.half().cpu()
+        def importance(sig: torch.Tensor):
+            sc = torch.softmax(sig, dim=0)
+            avg= sig.mean(1, keepdim=True)
+            mask = sig > avg * above_average_value_ratio
+            sc[mask] = score_calibration_value
+            return sc
 
-        print(f"[SimpleWrapper] dumping {len(sd)} state_dict keys")
-        return sd
+        def merge_param(delta, base, mag_rank, dir_rank):
+            try:
+                ms = importance(mag_rank)
+                ds = importance(dir_rank)
+                w = 0.5 * (ms + ds)
+                w = w.view(delta.shape[0], *([1]*(delta.dim()-2)), delta.shape[-1])
+                merged = base + (delta * w).sum(0)
+                return merged if merged.shape == base.shape else base
+            except Exception:
+                return base
 
-    def __getattr__(self, name):
-        # Avoid recursion during initialization
-        if "model" not in self.__dict__:
-            raise AttributeError(name)
+        merged_params = {}
+        fell_back = 0
+        common = set(pre_mag.keys())
+        for tv in task_vectors:
+            common &= set(tv.task_vector_param_dict.keys())
 
-        # fallback to dummy.model first
-        if hasattr(self.model, name):
-            return getattr(self.model, name)
-        # then to submodules
-        for attr in ("_unet", "_clip", "_vae", "_clip_vision"):
-            mdl = getattr(self, attr)
-            if mdl is not None and hasattr(mdl, name):
-                return getattr(mdl, name)
-        raise AttributeError(f"{type(self).__name__!r} has no attribute {name!r}")
+        for name in tqdm(common, desc=f"[{self.method}] merging"):
+            try:
+                delta = torch.stack([tv.task_vector_param_dict[name] for tv in task_vectors])
+                magd  = torch.stack([d[0][name] for d in diff_list])
+                dird  = torch.stack([d[1][name] for d in diff_list])
+                rankm = rank_sig(magd)
+                rankd = rank_sig(dird)
+            except Exception:
+                merged_params[name] = pre_params[name]
+                fell_back += 1
+                continue
+            merged = merge_param(delta, pre_params[name], rankm, rankd)
+            merged_params[name] = merged
+            if torch.allclose(merged, pre_params[name]):
+                fell_back += 1
 
+        total = len(common)
+        print(f"[{self.method}] merged {total - fell_back} / {total} parameters")
+        return merged_params
 
-# ─── HELPERS ──────────────────────────────────────────────────────────────────
-
-def _get_unet(wrapper):
-    mdl = getattr(wrapper, "model", wrapper)
-    if isinstance(mdl, UNet2DConditionModel):
-        return mdl
-    for attr in ("unet", "diffusion_model", "unet1", "unets"):
-        cand = getattr(mdl, attr, None)
-        if isinstance(cand, UNet2DConditionModel):
-            return cand
-    raise AttributeError(f"No U-Net found on {type(mdl).__name__}")
-
-
-def _get_clip(wrapper):
-    mdl = getattr(wrapper, "model", wrapper)
-    if isinstance(mdl, nn.Module) and not any(hasattr(mdl, a) for a in ("clip", "text_encoder", "text_encoder_1")):
-        return mdl
-    for attr in ("clip", "text_encoder", "text_encoder_1"):
-        cand = getattr(mdl, attr, None)
-        if isinstance(cand, nn.Module):
-            return cand
-    raise AttributeError(f"No CLIP encoder found on {type(mdl).__name__}")
-
-
-def _unwrap_pipeline(obj, _seen=None):
-    if _seen is None:
-        _seen = set()
-    if id(obj) in _seen:
-        return obj
-    _seen.add(id(obj))
-    if isinstance(obj, _SimpleWrapper):
-        return _unwrap_pipeline(obj.model, _seen)
-    nxt = getattr(obj, "model", None)
-    if nxt is not None and nxt is not obj:
-        return _unwrap_pipeline(nxt, _seen)
-    return obj
-
-
-# ─── MERGE NODES ──────────────────────────────────────────────────────────────
 
 class DonutWidenMergeUNet:
-    class_type = "CUSTOM"; aux_id = "DonutsDelivery/ComfyUI-DonutNodes"
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "models": ("MODELLIST",),
-            "exclude_regex": ("STRING", {"default": ""}),
-            "above_avg": ("FLOAT", {"default": 1.0, "min": 0.0}),
-            "score_calib": ("FLOAT", {"default": 1.0, "min": 0.0}),
-        }}
+        return {
+            "required": {
+                "model_base": ("MODEL",),
+                "model_other": ("MODEL",),
+                "above_average_value_ratio": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+                "score_calibration_value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+            }
+        }
+
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "execute"
-    CATEGORY = "merging"
+    CATEGORY = "donut"
 
-    def execute(self, models, exclude_regex, above_avg, score_calib):
-        try:
-            orig = models[0]
-            unets = [_get_unet(m) for m in models]
-
-            cpu, gpu = torch.device("cpu"), next(unets[0].parameters()).device
-            for u in unets: u.to(cpu)
-
-            regexes = [r.strip() for r in exclude_regex.split(",") if r.strip()]
-            merger = MergingMethod("widen_merging")
-            with torch.no_grad():
-                merged = merger.widen_merging(
-                    merged_model=unets[0],
-                    models_to_merge=unets[1:],
-                    exclude_param_names_regex=regexes,
-                    above_average_value_ratio=above_avg,
-                    score_calibration_value=score_calib,
-                )
-            if isinstance(merged, dict) and merged:
-                unets[0].load_state_dict(merged, strict=False)
-            for u in unets:
-                u.to(gpu)
-            gc.collect()
-
-            base_pipe = _unwrap_pipeline(orig)
-            if hasattr(base_pipe, "unet"):
-                base_pipe.unet = unets[0]
-            return (_SimpleWrapper(pipeline=base_pipe),)
-
-        except Exception:
-            traceback.print_exc()
-            raise
+    def execute(self, model_base, model_other, above_average_value_ratio, score_calibration_value):
+        merging = MergingMethod("WidenMergeUNet")
+        merged_params = merging.widen_merging(
+            merged_model=model_base.model,
+            models_to_merge=[model_other.model],
+            exclude_param_names_regex=[],
+            above_average_value_ratio=above_average_value_ratio,
+            score_calibration_value=score_calibration_value,
+        )
+        model_base.model.load_state_dict(merged_params, strict=False)
+        return (model_base,)
 
 
 class DonutWidenMergeCLIP:
-    class_type = "CUSTOM"; aux_id = "DonutsDelivery/ComfyUI-DonutNodes"
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "clips": ("CLIPLIST",),
-            "exclude_regex": ("STRING", {"default": ""}),
-            "above_avg": ("FLOAT", {"default": 1.0, "min": 0.0}),
-            "score_calib": ("FLOAT", {"default": 1.0, "min": 0.0}),
-        }}
+        return {
+            "required": {
+                "clip_base": ("CLIP",),
+                "clip_other": ("CLIP",),
+                "above_average_value_ratio": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+                "score_calibration_value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+            }
+        }
+
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "execute"
-    CATEGORY = "merging"
+    CATEGORY = "donut"
 
-    def execute(self, clips, exclude_regex, above_avg, score_calib):
-        try:
-            orig = clips[0]
-            encs = [_get_clip(c) for c in clips]
+    def execute(self, clip_base, clip_other, above_average_value_ratio, score_calibration_value):
+        merging = MergingMethod("WidenMergeCLIP")
+        merged_params = merging.widen_merging(
+            merged_model=clip_base.model,
+            models_to_merge=[clip_other.model],
+            exclude_param_names_regex=[],
+            above_average_value_ratio=above_average_value_ratio,
+            score_calibration_value=score_calibration_value,
+        )
+        clip_base.model.load_state_dict(merged_params, strict=False)
+        return (clip_base,)
 
-            cpu, gpu = torch.device("cpu"), next(encs[0].parameters()).device
-            for c in encs: c.to(cpu)
-
-            regexes = [r.strip() for r in exclude_regex.split(",") if r.strip()]
-            merger = MergingMethod("widen_merging")
-            with torch.no_grad():
-                merged = merger.widen_merging(
-                    merged_model=encs[0],
-                    models_to_merge=encs[1:],
-                    exclude_param_names_regex=regexes,
-                    above_average_value_ratio=above_avg,
-                    score_calibration_value=score_calib,
-                )
-            if isinstance(merged, dict) and merged:
-                encs[0].load_state_dict(merged, strict=False)
-            for c in encs:
-                c.to(gpu)
-            gc.collect()
-
-            base_pipe = _unwrap_pipeline(orig)
-            if hasattr(base_pipe, "text_encoder"):
-                base_pipe.text_encoder = encs[0]
-            return (_SimpleWrapper(pipeline=base_pipe),)
-
-        except Exception:
-            traceback.print_exc()
-            raise
-
-
-# ─── EXPORT ───────────────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
     "DonutWidenMergeUNet": DonutWidenMergeUNet,
     "DonutWidenMergeCLIP": DonutWidenMergeCLIP,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    k: k.replace("Donut", "Donut ") for k in NODE_CLASS_MAPPINGS
 }
