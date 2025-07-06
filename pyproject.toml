@@ -1,6 +1,6 @@
 [project]
 name = "donutnodes"
-description = "ComfyUI-DonutNodes offers advanced WIDEN merge algorithms, custom detailers, per-block SDXL control, dual-branch CLIP blending, and block-weighted LoRA stacking with enhanced memory management."
+description = "ComfyUI-DonutNodes offers custom nodes for grouped weight/bias scaling, per-block SDXL control, dual-branch CLIP blending, and block-weighted LoRA stacking."
 version = "1.0.15"
 license = {file = "LICENSE"}
 
