@@ -181,10 +181,19 @@ def enhanced_widen_merging_with_dynamic_strength(
     
     # Create task vectors efficiently (these contain the deltas we need)
     print("[ENHANCED WIDEN] Creating TaskVectors for delta computation...")
+    monitor_memory_usage("PRE-TASKVECTOR")
     models_to_merge_task_vectors = [
         TaskVector(merged_model, model_to_merge, exclude_param_names_regex) 
         for model_to_merge in models_to_merge
     ]
+    
+    # Immediate cleanup after TaskVector creation to free model references
+    monitor_memory_usage("POST-TASKVECTOR")
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    monitor_memory_usage("POST-TASKVECTOR-CLEANUP")
     
     # Create minimal pretrained parameter reference (only what we need for final merging)
     print("[ENHANCED WIDEN] Creating minimal parameter reference...")
@@ -236,8 +245,16 @@ def enhanced_widen_merging_with_dynamic_strength(
                     )  # Shape: [flattened_features]
             
             models_to_merge_param_magnitude_direction_diff_tuples.append((magnitude_diffs, direction_diffs))
+            
+            # Cleanup intermediate tensors after each model to prevent accumulation
+            del magnitude_diffs, direction_diffs
         
         print(f"[ENHANCED WIDEN] Computed differences for {len(models_to_merge_task_vectors)} models efficiently")
+        
+        # Cleanup after magnitude/direction computation
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         # Step 2: Enhanced parameter merging with dynamic compatibility-based strength
         merged_params = _merge_param_magnitude_direction_with_dynamic_strength(
@@ -452,9 +469,9 @@ def _compatibility_to_merge_strength(compatibility_score, base_merge_strength, s
     sigmoid_input = (normalized_score - 0.5) * sensitivity
     sigmoid_output = 1.0 / (1.0 + np.exp(-sigmoid_input))
     
-    # Dynamic range: 10% to 100% of base merge strength
-    min_strength = 0.1 * base_merge_strength
-    max_strength = base_merge_strength
+    # Dynamic range: 50% to 150% of base merge strength (more usable range)
+    min_strength = 0.5 * base_merge_strength
+    max_strength = 1.5 * base_merge_strength
     
     # Map to merge strength range
     merge_strength = min_strength + (max_strength - min_strength) * sigmoid_output
@@ -646,6 +663,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
     failed_count = 0
     no_rankings_count = 0
     widen_merged_count = 0  # For parameters using WIDEN rankings
+    processed_count = 0  # Track total processed parameters for memory cleanup
     
     # Memory monitoring function (for logging only - never stop processing)
     def check_memory_status():
@@ -737,6 +755,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                     # Skip parameters that don't have rankings (shouldn't happen if magnitude/direction computation worked)
                     merged_params[param_name] = pretrained_param_dict[param_name].to(target_device)
                     no_rankings_count += 1
+                    processed_count += 1
                     widen_diagnostics['parameters_skipped_no_rankings'] += 1
                     continue
                 
@@ -763,6 +782,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                     print(f"[SKIP] Skipping {param_name} (score={compatibility_score:.4f} < threshold={skip_threshold})")
                     merged_params[param_name] = pretrained_param_dict[param_name].to(target_device)
                     skipped_count += 1
+                    processed_count += 1
                     widen_diagnostics['parameters_skipped_threshold'] += 1
                     continue
                 
@@ -812,6 +832,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 # Move final result to target device and immediately free processing memory
                 merged_params[param_name] = merged_param.to(target_device)
                 widen_merged_count += 1  # Count successful WIDEN merges
+                processed_count += 1  # Increment processed parameter count
                 
                 # Clean up computation tensors to free VRAM and RAM
                 try:
@@ -824,6 +845,13 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 except:
                     pass
                     
+                # Periodic aggressive memory cleanup to prevent crashes
+                if processed_count % 50 == 0:  # Every 50 parameters
+                    import gc
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    
             except Exception as e:
                 print(f"[ERROR] Failed to merge parameter {param_name}: {e}")
                 import traceback
@@ -831,6 +859,13 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 # Fallback: use original parameter
                 merged_params[param_name] = pretrained_param_dict[param_name].to(target_device)
                 failed_count += 1
+                processed_count += 1
+                
+                # Extra cleanup on errors to prevent cascade failures
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
     
     # Calculate actual merge statistics
     total_merged_count = len(merged_params)
@@ -889,16 +924,24 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
     else:
         print(f"[ENHANCED WIDEN] ✓ All parameters processed - WIDEN merge integrity maintained")
     
-    # Clean up intermediate variables to free memory
-    del models_to_merge_param_magnitude_direction_diff_tuples
-    del pretrained_param_dict
-    del models_to_merge_task_vectors
+    # Aggressive memory cleanup to prevent crashes
+    try:
+        del models_to_merge_param_magnitude_direction_diff_tuples
+    except: pass
+    try:
+        del pretrained_param_dict
+    except: pass
+    try:
+        del models_to_merge_task_vectors
+    except: pass
     
-    # Force garbage collection to free memory
+    # Clear any remaining local variables that might hold references
     import gc
     gc.collect()
+    gc.collect()  # Double collection for stubborn references
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()  # Wait for GPU operations to complete
     
     return merged_params, widen_diagnostics
 
@@ -1277,6 +1320,22 @@ def force_cleanup():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+
+def monitor_memory_usage(label=""):
+    """Monitor memory usage for debugging"""
+    try:
+        import psutil
+        process = psutil.Process()
+        ram_mb = process.memory_info().rss / 1024 / 1024
+        
+        if torch.cuda.is_available():
+            gpu_allocated = torch.cuda.memory_allocated() / 1024 / 1024
+            gpu_reserved = torch.cuda.memory_reserved() / 1024 / 1024
+            print(f"[MEMORY-{label}] RAM: {ram_mb:.1f}MB, GPU: {gpu_allocated:.1f}MB allocated, {gpu_reserved:.1f}MB reserved")
+        else:
+            print(f"[MEMORY-{label}] RAM: {ram_mb:.1f}MB")
+    except Exception as e:
+        print(f"[MEMORY-{label}] Monitor failed: {e}")
 
 class MemoryExhaustionError(Exception):
     pass
