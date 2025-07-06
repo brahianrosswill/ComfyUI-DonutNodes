@@ -472,7 +472,7 @@ class MergingMethod:
             self._debug_count = 0
         if self._debug_count < 3:  # Log first 3 calls
             self._debug_count += 1
-            debug_scores = True
+            debug_scores = False  # Disable verbose debug output
         
         if debug_scores:
             print(f"[SDXL SCORE DEBUG] Input tensor shape: {sig_tensor.shape}, layer: {layer_type}")

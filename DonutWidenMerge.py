@@ -384,7 +384,7 @@ def _rank_per_param_magnitude_or_direction_within_model(models_to_merge_param_di
 def _compute_importance_scores(input_significance_tensor, above_average_value_ratio=1.0, score_calibration_value=1.0):
     """Compute importance scores (fixed WIDEN algorithm)"""
     # Debug: Log tensor properties - ALWAYS DEBUG FOR NOW
-    debug_scores = True
+    debug_scores = False  # Disable verbose debug output
     if hasattr(_compute_importance_scores, 'debug_count'):
         _compute_importance_scores.debug_count += 1
     else:
@@ -410,12 +410,8 @@ def _compute_importance_scores(input_significance_tensor, above_average_value_ra
     # For single model (shape [1, features]), softmax across features (dim=1)
     # For multiple models (shape [models, features]), softmax across models (dim=0)
     if input_significance_tensor.shape[0] == 1:
-        # Debug: Test what happens with softmax
-        print(f"[SOFTMAX TEST] Input shape: {input_significance_tensor.shape}")
-        print(f"[SOFTMAX TEST] Sample values: {input_significance_tensor[0][:10]}")
+        # Single model case: softmax across features (dim=1)
         importance_scores = torch.softmax(input_significance_tensor, dim=1)
-        print(f"[SOFTMAX TEST] Output sample: {importance_scores[0][:10]}")
-        print(f"[SOFTMAX TEST] Output sum: {importance_scores.sum().item()}")
     else:
         importance_scores = torch.softmax(input_significance_tensor, dim=0)
     
@@ -529,7 +525,6 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
     }
     
     # Unpack magnitude and direction differences
-    print(f"[DEBUG] Input magnitude/direction tuples: {len(models_to_merge_param_magnitude_direction_diff_tuples)}")
     
     if not models_to_merge_param_magnitude_direction_diff_tuples:
         print(f"[CRITICAL] No magnitude/direction differences computed!")
@@ -543,10 +538,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
         models_to_merge_param_direction_diff_tuple = [model_diffs[1] for model_diffs in models_to_merge_param_magnitude_direction_diff_tuples]
         
         param_names_merged_by_magnitude_direction = list(models_to_merge_param_magnitude_diff_tuple[0].keys())
-        print(f"[DEBUG] Parameters eligible for magnitude/direction ranking: {len(param_names_merged_by_magnitude_direction)}")
-        if param_names_merged_by_magnitude_direction:
-            print(f"[DEBUG] Sample eligible parameters: {param_names_merged_by_magnitude_direction[:3]}")
-        else:
+        if not param_names_merged_by_magnitude_direction:
             print(f"[CRITICAL] No parameters eligible for ranking - all filtered out!")
     
     # PHASE 1: Compute ALL rankings on CPU to preserve WIDEN cross-parameter validation
@@ -722,9 +714,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 
                 # Only compute importance scores if we have valid ranking tensors
                 if models_to_merge_param_magnitude_rank is not None and models_to_merge_param_direction_rank is not None:
-                    # Debug input tensors before computing scores
-                    print(f"[INPUT DEBUG] {param_name}: magnitude_rank shape={models_to_merge_param_magnitude_rank.shape}, values={models_to_merge_param_magnitude_rank}")
-                    print(f"[INPUT DEBUG] {param_name}: direction_rank shape={models_to_merge_param_direction_rank.shape}, values={models_to_merge_param_direction_rank}")
+                    # Magnitude and direction rankings ready for importance score computation
                     
                     # Compute importance scores using original WIDEN algorithm
                     magnitude_scores = _compute_importance_scores(
@@ -762,9 +752,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 # Combine scores (original WIDEN approach)
                 combined_scores = 0.5 * (magnitude_scores + direction_scores)
                 
-                # Debug combined scores
-                print(f"[COMBINE DEBUG] {param_name}: mag_scores={magnitude_scores.min().item():.6f}-{magnitude_scores.max().item():.6f}, dir_scores={direction_scores.min().item():.6f}-{direction_scores.max().item():.6f}")
-                print(f"[COMBINE DEBUG] {param_name}: combined_scores={combined_scores.min().item():.6f}-{combined_scores.max().item():.6f}")
+                # Combined magnitude and direction scores computed
                 
                 # Compute compatibility score - higher means more compatible/important
                 compatibility_score = torch.mean(combined_scores).item()
@@ -779,7 +767,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 
                 # Skip parameters with very low compatibility (if threshold > 0)
                 if skip_threshold > 0.0 and compatibility_score <= skip_threshold:
-                    print(f"[SKIP] Skipping {param_name} (score={compatibility_score:.4f} < threshold={skip_threshold})")
+                    # Skipping parameter with low compatibility score
                     merged_params[param_name] = pretrained_param_dict[param_name].to(target_device)
                     skipped_count += 1
                     processed_count += 1
