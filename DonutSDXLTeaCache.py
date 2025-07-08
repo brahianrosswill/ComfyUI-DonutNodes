@@ -24,7 +24,7 @@ def teacache_sdxl_unet_forward(
     """SDXL UNet forward pass with TeaCache acceleration."""
     
     # Get TeaCache options
-    rel_l1_thresh = transformer_options.get("rel_l1_thresh", 0.1)
+    cache_threshold = transformer_options.get("cache_threshold", 0.1)
     coefficients = transformer_options.get("coefficients", [1.0, -0.5, 0.1])
     enable_teacache = transformer_options.get("enable_teacache", True)
     cache_device = transformer_options.get("cache_device", x.device)
@@ -54,7 +54,7 @@ def teacache_sdxl_unet_forward(
                 distance_increment = poly1d(coefficients, rel_l1)
                 self.teacache_accumulated_distance += distance_increment.item()
                 
-                if self.teacache_accumulated_distance < rel_l1_thresh:
+                if self.teacache_accumulated_distance < cache_threshold:
                     self.teacache_should_calc = False
                 else:
                     self.teacache_should_calc = True
@@ -89,12 +89,12 @@ class DonutSDXLTeaCache:
         return {
             "required": {
                 "model": ("MODEL", {"tooltip": "The SDXL diffusion model TeaCache will be applied to."}),
-                "rel_l1_thresh": ("FLOAT", {
+                "cache_threshold": ("FLOAT", {
                     "default": 0.1, 
                     "min": 0.0, 
                     "max": 10.0, 
                     "step": 0.01, 
-                    "tooltip": "Cache threshold - lower values = more aggressive caching. Must be non-negative."
+                    "tooltip": "Cache threshold - higher values = more aggressive caching (0.05=quality, 0.1=balanced, 0.2+=speed)"
                 }),
                 "start_percent": ("FLOAT", {
                     "default": 0.0, 
@@ -120,7 +120,7 @@ class DonutSDXLTeaCache:
                 }),
                 "cache_mode": (["conservative", "balanced", "aggressive"], {
                     "default": "balanced", 
-                    "tooltip": "Cache mode preset that adjusts rel_l1_thresh."
+                    "tooltip": "Cache mode preset that adjusts cache_threshold."
                 }),
             }
         }
@@ -131,20 +131,20 @@ class DonutSDXLTeaCache:
     CATEGORY = "DonutNodes"
     TITLE = "Donut SDXL TeaCache"
     
-    def apply_teacache(self, model, rel_l1_thresh: float, start_percent: float, end_percent: float, 
+    def apply_teacache(self, model, cache_threshold: float, start_percent: float, end_percent: float, 
                       cache_device: str, enable: bool, cache_mode: str):
         """Apply TeaCache to SDXL model."""
         
-        if not enable or rel_l1_thresh == 0:
+        if not enable or cache_threshold == 0:
             return (model,)
 
         # Adjust threshold based on cache mode
         mode_adjustments = {
-            "conservative": 1.5,  # Higher threshold = less caching
+            "conservative": 0.5,  # Lower multiplier = less caching
             "balanced": 1.0,      # Use threshold as-is
-            "aggressive": 0.5     # Lower threshold = more caching
+            "aggressive": 1.5     # Higher multiplier = more caching
         }
-        adjusted_thresh = rel_l1_thresh * mode_adjustments[cache_mode]
+        adjusted_thresh = cache_threshold * mode_adjustments[cache_mode]
 
         # SDXL coefficients (conservative values for UNet architecture)
         sdxl_coefficients = [1.0, -0.3, 0.05]
@@ -155,7 +155,7 @@ class DonutSDXLTeaCache:
         if 'transformer_options' not in new_model.model_options:
             new_model.model_options['transformer_options'] = {}
             
-        new_model.model_options["transformer_options"]["rel_l1_thresh"] = adjusted_thresh
+        new_model.model_options["transformer_options"]["cache_threshold"] = adjusted_thresh
         new_model.model_options["transformer_options"]["coefficients"] = sdxl_coefficients
         new_model.model_options["transformer_options"]["model_type"] = "sdxl"
         new_model.model_options["transformer_options"]["cache_device"] = (
