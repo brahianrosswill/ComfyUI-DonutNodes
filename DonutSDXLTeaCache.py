@@ -262,11 +262,11 @@ class DonutSDXLTeaCacheStats:
 
 # Node mappings
 NODE_CLASS_MAPPINGS = {
-    "DonutSDXLTeaCache": DonutSDXLTeaCache,
-    "DonutSDXLTeaCacheStats": DonutSDXLTeaCacheStats,
+    "DonutSDXLTeaCacheBase": DonutSDXLTeaCache,
+    "DonutSDXLTeaCacheBaseStats": DonutSDXLTeaCacheStats,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DonutSDXLTeaCache": "Donut SDXL TeaCache",
-    "DonutSDXLTeaCacheStats": "Donut SDXL TeaCache Stats",
+    "DonutSDXLTeaCacheBase": "Donut SDXL TeaCache (Base)",
+    "DonutSDXLTeaCacheBaseStats": "Donut SDXL TeaCache (Base) Stats",
 }

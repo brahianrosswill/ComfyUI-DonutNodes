@@ -627,11 +627,8 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
             block_time = time.time() - block_start_time
             print(f"[ENHANCED WIDEN] Block {block_name} completed in {block_time:.1f}s")
             
-            # Aggressive memory cleanup after each block
-            import gc
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Light cleanup after each block group
+            gentle_cleanup()
     
     print(f"[ENHANCED WIDEN] Phase 1 complete: Rankings computed for {len(magnitude_rankings)} parameters")
     
@@ -833,12 +830,9 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 except:
                     pass
                     
-                # Periodic aggressive memory cleanup to prevent crashes
-                if processed_count % 50 == 0:  # Every 50 parameters
-                    import gc
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                # Periodic light cleanup to prevent memory buildup
+                if processed_count % 100 == 0:  # Reduced frequency from 50 to 100
+                    gentle_cleanup()
                     
             except Exception as e:
                 print(f"[ERROR] Failed to merge parameter {param_name}: {e}")
@@ -849,11 +843,8 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 failed_count += 1
                 processed_count += 1
                 
-                # Extra cleanup on errors to prevent cascade failures
-                import gc
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                # Light cleanup on errors
+                gentle_cleanup()
     
     # Calculate actual merge statistics
     total_merged_count = len(merged_params)
@@ -1208,7 +1199,18 @@ class LoRAStackProcessor:
 
 # Global cache for preventing redundant processing
 _MERGE_CACHE = {}
-_CACHE_MAX_SIZE = 10
+_CACHE_MAX_SIZE = 3  # Reduced from 10 to prevent memory bloat
+
+def clear_session_cache():
+    """Clear global merge cache for fresh session start"""
+    global _MERGE_CACHE
+    if _MERGE_CACHE:
+        print(f"[Session] Clearing {len(_MERGE_CACHE)} cached merge results")
+        _MERGE_CACHE.clear()
+        # Light cleanup after cache clear
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 def monitor_memory(label=""):
     """Print current memory usage including VRAM"""
@@ -1288,26 +1290,31 @@ def check_cache_for_merge(cache_key):
     return None
 
 def store_merge_result(cache_key, result):
-    """Store merge result in cache"""
+    """Store merge result in cache with memory monitoring"""
     global _MERGE_CACHE
 
     # Clear old entries if cache is full
     if len(_MERGE_CACHE) >= _CACHE_MAX_SIZE:
         oldest_key = next(iter(_MERGE_CACHE))
         del _MERGE_CACHE[oldest_key]
+        # Light cleanup when removing old cache entries
+        gc.collect()
         print(f"[Cache] Removed oldest entry, cache size: {len(_MERGE_CACHE)}")
 
     _MERGE_CACHE[cache_key] = result
     print(f"[Cache] Stored merge result, cache size: {len(_MERGE_CACHE)}")
 
 def force_cleanup():
-    """Aggressive memory cleanup"""
-    gc.collect()
-    gc.collect()
-    gc.collect()
+    """Conservative memory cleanup to prevent CUDA allocator conflicts"""
+    gc.collect()  # Reduced from triple call to single call
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        # Removed torch.cuda.synchronize() to prevent allocator conflicts
+
+def gentle_cleanup():
+    """Very light cleanup for frequent use during processing"""
+    gc.collect()
+    # No CUDA operations to avoid allocator stress
 
 def monitor_memory_usage(label=""):
     """Monitor memory usage for debugging"""
@@ -2360,10 +2367,9 @@ class MergingMethod:
                 # Clean up all remaining tensors for this parameter
                 del base_param, final_merged
 
-                # FIXED: Less aggressive cleanup - only every 100 parameters instead of 50
-                if param_idx % 100 == 0:
-                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
-                    gc.collect()
+                # Light periodic cleanup - reduced frequency
+                if param_idx % 150 == 0:  # Further reduced frequency
+                    gentle_cleanup()
 
             except Exception as e:
                 failed_count += 1
@@ -2504,9 +2510,15 @@ class DonutWidenMergeUNet:
                 model_7=None, model_8=None, model_9=None, model_10=None,
                 model_11=None, model_12=None):
 
-        # FIXED: Aggressive memory cleanup before starting
-        print("[MEMORY] Pre-merge cleanup...")
-        force_cleanup()
+        # Conservative pre-merge setup with session cache management
+        print("[MEMORY] Pre-merge setup...")
+        
+        # Clear session cache if it's getting large (prevents accumulation)
+        if len(_MERGE_CACHE) >= _CACHE_MAX_SIZE:
+            clear_session_cache()
+        
+        # Light pre-merge cleanup
+        gentle_cleanup()
 
         # Check cache first
         all_models = [model_base, model_other, model_3, model_4, model_5, model_6,
@@ -2835,9 +2847,15 @@ class DonutWidenMergeCLIP:
                 clip_7=None, clip_8=None, clip_9=None, clip_10=None,
                 clip_11=None, clip_12=None):
 
-        # FIXED: Aggressive memory cleanup before starting
-        print("[MEMORY] Pre-merge cleanup...")
-        force_cleanup()
+        # Conservative pre-merge setup with session cache management
+        print("[MEMORY] Pre-merge setup...")
+        
+        # Clear session cache if it's getting large (prevents accumulation)
+        if len(_MERGE_CACHE) >= _CACHE_MAX_SIZE:
+            clear_session_cache()
+        
+        # Light pre-merge cleanup
+        gentle_cleanup()
 
         # Check cache first
         all_clips = [clip_base, clip_other, clip_3, clip_4, clip_5, clip_6,

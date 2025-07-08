@@ -1,0 +1,98 @@
+{
+  "1": {
+    "inputs": {
+      "ckpt_name": "SDXL/DDMv4_1.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "2": {
+    "inputs": {
+      "text": "masterpiece, best quality, highly detailed portrait of a beautiful woman holding a flower in her hands, detailed fingers, professional photography, 8k",
+      "clip": ["1", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "text": "bad quality, worst quality, blurry, low resolution, ugly",
+      "clip": ["1", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative)"
+    }
+  },
+  "4": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image"
+    }
+  },
+  "8": {
+    "inputs": {
+      "model": ["1", 0],
+      "is_patcher": true,
+      "object_to_patch": "diffusion_model",
+      "memory_format": "channels_last",
+      "fullgraph": false,
+      "dynamic": false,
+      "mode": "cache-all:max-autotune:low-precision",
+      "options": "",
+      "disable": false,
+      "backend": "velocator"
+    },
+    "class_type": "VelocatorCompileModel",
+    "_meta": {
+      "title": "🚀Compile Model"
+    }
+  },
+  "5": {
+    "inputs": {
+      "model": ["8", 0],
+      "seed": 123456,
+      "steps": 30,
+      "cfg": 8.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "positive": ["2", 0],
+      "negative": ["3", 0],
+      "latent_image": ["4", 0],
+      "denoise": 1.0
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "6": {
+    "inputs": {
+      "samples": ["5", 0],
+      "vae": ["1", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "7": {
+    "inputs": {
+      "images": ["6", 0],
+      "filename_prefix": "wavespeed_sdxl"
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

@@ -19,21 +19,9 @@ from .hot_reload            import NODE_DISPLAY_NAME_MAPPINGS as d_reload
 from .DonutOptunaNode       import NODE_CLASS_MAPPINGS        as m_optuna
 from .DonutOptunaNode       import NODE_DISPLAY_NAME_MAPPINGS as d_optuna
 
-# SDXL TeaCache
+# SDXL TeaCache (Base - High Performance)
 from .DonutSDXLTeaCache     import NODE_CLASS_MAPPINGS        as m_teacache
 from .DonutSDXLTeaCache     import NODE_DISPLAY_NAME_MAPPINGS as d_teacache
-
-# SDXL TeaCache Improved
-from .DonutSDXLTeaCacheImproved import NODE_CLASS_MAPPINGS        as m_teacache_improved
-from .DonutSDXLTeaCacheImproved import NODE_DISPLAY_NAME_MAPPINGS as d_teacache_improved
-
-# SDXL TeaCache Working
-from .DonutSDXLTeaCacheWorking import NODE_CLASS_MAPPINGS        as m_teacache_working
-from .DonutSDXLTeaCacheWorking import NODE_DISPLAY_NAME_MAPPINGS as d_teacache_working
-
-# SDXL TeaCache Tuned
-from .DonutSDXLTeaCacheTuned import NODE_CLASS_MAPPINGS        as m_teacache_tuned
-from .DonutSDXLTeaCacheTuned import NODE_DISPLAY_NAME_MAPPINGS as d_teacache_tuned
 
 # build globals
 NODE_CLASS_MAPPINGS = {
@@ -43,9 +31,6 @@ NODE_CLASS_MAPPINGS = {
     **m_reload,
     **m_optuna,
     **m_teacache,
-    **m_teacache_improved,
-    **m_teacache_working,
-    **m_teacache_tuned,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -53,7 +38,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **d_reload,
     **d_optuna,
     **d_teacache,
-    **d_teacache_improved,
-    **d_teacache_working,
-    **d_teacache_tuned,
 }
