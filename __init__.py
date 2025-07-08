@@ -15,9 +15,9 @@ from .donut_lora_nodes      import NODE_DISPLAY_NAME_MAPPINGS as d_lora
 from .hot_reload            import NODE_CLASS_MAPPINGS        as m_reload
 from .hot_reload            import NODE_DISPLAY_NAME_MAPPINGS as d_reload
 
-# optuna optimization
-from .DonutOptunaNode       import NODE_CLASS_MAPPINGS        as m_optuna
-from .DonutOptunaNode       import NODE_DISPLAY_NAME_MAPPINGS as d_optuna
+# optuna optimization (temporarily disabled - DonutOptunaNode.py not in repo)
+# from .DonutOptunaNode       import NODE_CLASS_MAPPINGS        as m_optuna
+# from .DonutOptunaNode       import NODE_DISPLAY_NAME_MAPPINGS as d_optuna
 
 # SDXL TeaCache (Base - High Performance)
 from .DonutSDXLTeaCache     import NODE_CLASS_MAPPINGS        as m_teacache
@@ -29,13 +29,13 @@ NODE_CLASS_MAPPINGS = {
     **m6, **m7,
     **m_lora,
     **m_reload,
-    **m_optuna,
+    # **m_optuna,  # disabled - file not in repo
     **m_teacache,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     **d_lora,
     **d_reload,
-    **d_optuna,
+    # **d_optuna,  # disabled - file not in repo
     **d_teacache,
 }
