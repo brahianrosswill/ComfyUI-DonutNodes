@@ -93,8 +93,8 @@ class DonutSDXLTeaCache:
                     "default": 0.1, 
                     "min": 0.0, 
                     "max": 10.0, 
-                    "step": 0.01, 
-                    "tooltip": "Cache threshold - higher values = more aggressive caching (0.05=quality, 0.1=balanced, 0.2+=speed)"
+                    "step": 0.001, 
+                    "tooltip": "Cache threshold - higher values = more aggressive caching (0.04=quality, 0.05=balanced, 0.1+=speed)"
                 }),
                 "start_percent": ("FLOAT", {
                     "default": 0.0, 
