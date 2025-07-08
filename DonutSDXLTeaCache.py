@@ -90,11 +90,11 @@ class DonutSDXLTeaCache:
             "required": {
                 "model": ("MODEL", {"tooltip": "The SDXL diffusion model TeaCache will be applied to."}),
                 "cache_threshold": ("FLOAT", {
-                    "default": 0.1, 
+                    "default": 10.0, 
                     "min": 0.0, 
-                    "max": 10.0, 
-                    "step": 0.001, 
-                    "tooltip": "Cache threshold - higher values = more aggressive caching (0.04=quality, 0.05=balanced, 0.1+=speed)"
+                    "max": 100.0, 
+                    "step": 0.01, 
+                    "tooltip": "Cache threshold % - higher values = more aggressive caching (4%=quality, 5%=balanced, 10%+=speed)"
                 }),
                 "start_percent": ("FLOAT", {
                     "default": 0.0, 
@@ -138,13 +138,16 @@ class DonutSDXLTeaCache:
         if not enable or cache_threshold == 0:
             return (model,)
 
+        # Convert percentage to internal threshold (1% = 0.01)
+        internal_threshold = cache_threshold / 100.0
+        
         # Adjust threshold based on cache mode
         mode_adjustments = {
             "conservative": 0.5,  # Lower multiplier = less caching
             "balanced": 1.0,      # Use threshold as-is
             "aggressive": 1.5     # Higher multiplier = more caching
         }
-        adjusted_thresh = cache_threshold * mode_adjustments[cache_mode]
+        adjusted_thresh = internal_threshold * mode_adjustments[cache_mode]
 
         # SDXL coefficients (conservative values for UNet architecture)
         sdxl_coefficients = [1.0, -0.3, 0.05]
