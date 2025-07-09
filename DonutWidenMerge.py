@@ -760,16 +760,34 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 # Debug: Log compatibility scores for debugging
                 param_count = len(merged_params) + no_rankings_count + skipped_count
                 if param_count < 10 or skip_threshold > 0.0:
-                    print(f"[SKIP DEBUG] {param_name}: compatibility_score={compatibility_score:.4f}, skip_threshold={skip_threshold}")
+                    if skip_threshold > 0.0 and len(widen_diagnostics['compatibility_scores']) > 1:
+                        import numpy as np
+                        scores_so_far = np.array(widen_diagnostics['compatibility_scores'])
+                        percentile_threshold = np.percentile(scores_so_far, skip_threshold * 100)
+                        print(f"[SKIP DEBUG] {param_name}: compatibility_score={compatibility_score:.4f}, percentile_threshold={percentile_threshold:.4f} (skip_threshold={skip_threshold})")
+                    else:
+                        print(f"[SKIP DEBUG] {param_name}: compatibility_score={compatibility_score:.4f}, skip_threshold={skip_threshold}")
                 
                 # Skip parameters with very low compatibility (if threshold > 0)
-                if skip_threshold > 0.0 and compatibility_score <= skip_threshold:
-                    # Skipping parameter with low compatibility score
-                    merged_params[param_name] = pretrained_param_dict[param_name].to(target_device)
-                    skipped_count += 1
-                    processed_count += 1
-                    widen_diagnostics['parameters_skipped_threshold'] += 1
-                    continue
+                # Use percentile-based thresholding instead of absolute values
+                if skip_threshold > 0.0:
+                    # Calculate percentile threshold from collected scores
+                    if len(widen_diagnostics['compatibility_scores']) > 1:
+                        import numpy as np
+                        scores_so_far = np.array(widen_diagnostics['compatibility_scores'])
+                        percentile_threshold = np.percentile(scores_so_far, skip_threshold * 100)
+                        should_skip = compatibility_score <= percentile_threshold
+                    else:
+                        # For the first parameter, use absolute comparison as fallback
+                        should_skip = compatibility_score <= skip_threshold
+                    
+                    if should_skip:
+                        # Skipping parameter with low compatibility score
+                        merged_params[param_name] = pretrained_param_dict[param_name].to(target_device)
+                        skipped_count += 1
+                        processed_count += 1
+                        widen_diagnostics['parameters_skipped_threshold'] += 1
+                        continue
                 
                 # Compute dynamic merge strength
                 merge_strength = _compatibility_to_merge_strength(
@@ -869,8 +887,11 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
         compat_min, compat_max = min(compatibility_scores), max(compatibility_scores)
         compat_mean = sum(compatibility_scores) / len(compatibility_scores)
         compat_variance = sum((x - compat_mean)**2 for x in compatibility_scores) / len(compatibility_scores)
+        compat_range = compat_max - compat_min
+        # Use relative variance threshold based on score range
+        relative_variance_threshold = max(1e-6, (compat_range * 0.01) ** 2)
         print(f"  Compatibility Scores: {compat_min:.4f} - {compat_max:.4f} (mean: {compat_mean:.4f}, var: {compat_variance:.6f})")
-        print(f"  Score Distribution: {'✓ VARIED' if compat_variance > 1e-6 else '✗ UNIFORM (BUG!)'}")
+        print(f"  Score Distribution: {'✓ VARIED' if compat_variance > relative_variance_threshold else '✗ UNIFORM (BUG!)'}")
     else:
         print(f"  Compatibility Scores: NONE COMPUTED")
     
@@ -887,7 +908,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
     
     if skip_threshold > 0.0:
         skip_effectiveness = widen_diagnostics['parameters_skipped_threshold']
-        print(f"  Skip Threshold: {skip_threshold} -> {skip_effectiveness} parameters skipped")
+        print(f"  Skip Threshold: {skip_threshold} (percentile) -> {skip_effectiveness} parameters skipped")
         print(f"  Threshold Status: {'✓ ACTIVE' if skip_effectiveness > 0 else 'ⓘ NO EFFECT'}")
     
     # Critical diagnostic: If no parameters merged, investigate Phase 1
@@ -2626,7 +2647,10 @@ class DonutWidenMergeUNet:
                         compat_min, compat_max = min(compatibility_scores), max(compatibility_scores)
                         compat_mean = sum(compatibility_scores) / len(compatibility_scores)
                         compat_variance = sum((x - compat_mean)**2 for x in compatibility_scores) / len(compatibility_scores)
-                        score_health = "✓ VARIED" if compat_variance > 1e-6 else "✗ UNIFORM (BUG!)"
+                        compat_range = compat_max - compat_min
+                        # Use relative variance threshold based on score range
+                        relative_variance_threshold = max(1e-6, (compat_range * 0.01) ** 2)
+                        score_health = "✓ VARIED" if compat_variance > relative_variance_threshold else "✗ UNIFORM (BUG!)"
                     else:
                         compat_min = compat_max = compat_mean = 0.0
                         score_health = "NO SCORES"
@@ -2646,7 +2670,7 @@ class DonutWidenMergeUNet:
 ║ Compatibility Range: {compat_min:.4f} - {compat_max:.4f} (avg: {compat_mean:.4f})
 ║ Score Distribution: {score_health}
 ║ Parameter Ranking: {varied_count}/{total_scored} varied ({100*varied_count/total_scored if total_scored > 0 else 0:.1f}%) - {ranking_health}
-║ Skip Threshold: {skip_threshold} → {skipped_threshold} parameters skipped
+║ Skip Threshold: {skip_threshold} (percentile) → {skipped_threshold} parameters skipped
 ╚═══════════════════════════════════════════════════╝"""
                     # Create detailed parameter information
                     parameter_info = f"""╔═ WIDEN PARAMETER DETAILS ═╗
@@ -2706,7 +2730,10 @@ class DonutWidenMergeUNet:
                         compat_min, compat_max = min(compatibility_scores), max(compatibility_scores)
                         compat_mean = sum(compatibility_scores) / len(compatibility_scores)
                         compat_variance = sum((x - compat_mean)**2 for x in compatibility_scores) / len(compatibility_scores)
-                        score_health = "✓ VARIED" if compat_variance > 1e-6 else "✗ UNIFORM (BUG!)"
+                        compat_range = compat_max - compat_min
+                        # Use relative variance threshold based on score range
+                        relative_variance_threshold = max(1e-6, (compat_range * 0.01) ** 2)
+                        score_health = "✓ VARIED" if compat_variance > relative_variance_threshold else "✗ UNIFORM (BUG!)"
                     else:
                         compat_min = compat_max = compat_mean = 0.0
                         score_health = "NO SCORES"
@@ -2726,7 +2753,7 @@ class DonutWidenMergeUNet:
 ║ Compatibility Range: {compat_min:.4f} - {compat_max:.4f} (avg: {compat_mean:.4f})
 ║ Score Distribution: {score_health}
 ║ Parameter Ranking: {varied_count}/{total_scored} varied ({100*varied_count/total_scored if total_scored > 0 else 0:.1f}%) - {ranking_health}
-║ Skip Threshold: {skip_threshold} → {skipped_threshold} parameters skipped
+║ Skip Threshold: {skip_threshold} (percentile) → {skipped_threshold} parameters skipped
 ╚═══════════════════════════════════════════════════╝"""
                     # Create detailed parameter information  
                     parameter_info = f"""╔═ WIDEN PARAMETER DETAILS ═╗
@@ -2977,7 +3004,10 @@ class DonutWidenMergeCLIP:
                         compat_min, compat_max = min(compatibility_scores), max(compatibility_scores)
                         compat_mean = sum(compatibility_scores) / len(compatibility_scores)
                         compat_variance = sum((x - compat_mean)**2 for x in compatibility_scores) / len(compatibility_scores)
-                        score_health = "✓ VARIED" if compat_variance > 1e-6 else "✗ UNIFORM (BUG!)"
+                        compat_range = compat_max - compat_min
+                        # Use relative variance threshold based on score range
+                        relative_variance_threshold = max(1e-6, (compat_range * 0.01) ** 2)
+                        score_health = "✓ VARIED" if compat_variance > relative_variance_threshold else "✗ UNIFORM (BUG!)"
                     else:
                         compat_min = compat_max = compat_mean = 0.0
                         score_health = "NO SCORES"
@@ -2997,7 +3027,7 @@ class DonutWidenMergeCLIP:
 ║ Compatibility Range: {compat_min:.4f} - {compat_max:.4f} (avg: {compat_mean:.4f})
 ║ Score Distribution: {score_health}
 ║ Parameter Ranking: {varied_count}/{total_scored} varied ({100*varied_count/total_scored if total_scored > 0 else 0:.1f}%) - {ranking_health}
-║ Skip Threshold: {skip_threshold} → {skipped_threshold} parameters skipped
+║ Skip Threshold: {skip_threshold} (percentile) → {skipped_threshold} parameters skipped
 ╚═══════════════════════════════════════════════════╝"""
                     # Create detailed parameter information
                     parameter_info = f"""╔═ WIDEN CLIP PARAMETER DETAILS ═╗
@@ -3057,7 +3087,10 @@ class DonutWidenMergeCLIP:
                         compat_min, compat_max = min(compatibility_scores), max(compatibility_scores)
                         compat_mean = sum(compatibility_scores) / len(compatibility_scores)
                         compat_variance = sum((x - compat_mean)**2 for x in compatibility_scores) / len(compatibility_scores)
-                        score_health = "✓ VARIED" if compat_variance > 1e-6 else "✗ UNIFORM (BUG!)"
+                        compat_range = compat_max - compat_min
+                        # Use relative variance threshold based on score range
+                        relative_variance_threshold = max(1e-6, (compat_range * 0.01) ** 2)
+                        score_health = "✓ VARIED" if compat_variance > relative_variance_threshold else "✗ UNIFORM (BUG!)"
                     else:
                         compat_min = compat_max = compat_mean = 0.0
                         score_health = "NO SCORES"
@@ -3077,7 +3110,7 @@ class DonutWidenMergeCLIP:
 ║ Compatibility Range: {compat_min:.4f} - {compat_max:.4f} (avg: {compat_mean:.4f})
 ║ Score Distribution: {score_health}
 ║ Parameter Ranking: {varied_count}/{total_scored} varied ({100*varied_count/total_scored if total_scored > 0 else 0:.1f}%) - {ranking_health}
-║ Skip Threshold: {skip_threshold} → {skipped_threshold} parameters skipped
+║ Skip Threshold: {skip_threshold} (percentile) → {skipped_threshold} parameters skipped
 ║ Status: ✓ Enhanced WIDEN with Static Strength
 ╚═══════════════════════════════════════════════════╝"""
                     # Create detailed parameter information
