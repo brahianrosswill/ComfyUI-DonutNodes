@@ -14,6 +14,11 @@ import time
 # use package-relative path for ComfyUI
 from .utils.sdxl_safetensors import ensure_same_device
 
+# Import memory profiling utilities
+from .memory_utils import (MemoryProfiler, memory_profiler, optimize_tensor_operations,
+                          smart_device_management, batch_process_parameters, 
+                          memory_efficient_tensor_ops, get_optimized_cache)
+
 # Import merging methods and utilities
 from .merging_methods import MergingMethod
 from .task_vector import TaskVector
@@ -130,7 +135,8 @@ def enhanced_widen_merging_with_dynamic_strength(
     base_merge_strength,
     rank_sensitivity,
     skip_threshold,
-    normalization_mode
+    normalization_mode,
+    ultra_memory_mode=False
 ):
     """Enhanced WIDEN merging with dynamic compatibility-based merge strength"""
     
@@ -146,21 +152,24 @@ def enhanced_widen_merging_with_dynamic_strength(
             free_memory, total_memory = torch.cuda.mem_get_info()
             vram_available_mb = free_memory / (1024 * 1024)
             allocated_mb = torch.cuda.memory_allocated() / (1024 * 1024)
-            print(f"[ENHANCED WIDEN] GPU memory - Available: {vram_available_mb:.1f}MB, Allocated: {allocated_mb:.1f}MB")
+            # print(f"[ENHANCED WIDEN] GPU memory - Available: {vram_available_mb:.1f}MB, Allocated: {allocated_mb:.1f}MB")
         except:
             vram_available_mb = 1000  # Conservative fallback
     
-    # Check system RAM
+    # Check system RAM and auto-enable ultra memory mode if needed
     try:
         import psutil
         ram_info = psutil.virtual_memory()
         ram_available_gb = ram_info.available / (1024 * 1024 * 1024)
         ram_total_gb = ram_info.total / (1024 * 1024 * 1024)
         ram_used_percent = ram_info.percent
-        print(f"[ENHANCED WIDEN] System RAM - Available: {ram_available_gb:.1f}GB/{ram_total_gb:.1f}GB ({100-ram_used_percent:.1f}% free)")
+        # print(f"[ENHANCED WIDEN] System RAM - Available: {ram_available_gb:.1f}GB/{ram_total_gb:.1f}GB ({100-ram_used_percent:.1f}% free)")
+        
+        # Log memory info for debugging
+        # print(f"[MEMORY DEBUG] Total system RAM: {ram_total_gb:.1f}GB, Available: {ram_available_gb:.1f}GB")
         
         if ram_available_gb < 2.0:
-            print(f"[WARNING] Low RAM detected ({ram_available_gb:.1f}GB available). Using conservative processing.")
+            print(f"[WARNING] Very low RAM detected ({ram_available_gb:.1f}GB available). Using ultra conservative processing.")
     except:
         ram_available_gb = 4.0  # Conservative fallback
     
@@ -171,21 +180,43 @@ def enhanced_widen_merging_with_dynamic_strength(
     ranking_device = torch.device("cpu")
     
     if ram_available_gb < 2.0:
-        print(f"[ENHANCED WIDEN] Low RAM mode ({ram_available_gb:.1f}GB): Conservative CPU processing")
+        pass  # print(f"[ENHANCED WIDEN] Low RAM mode ({ram_available_gb:.1f}GB): Conservative CPU processing")
     elif ram_available_gb > 4.0:
-        print(f"[ENHANCED WIDEN] High RAM mode ({ram_available_gb:.1f}GB): Optimized CPU processing")
+        pass  # print(f"[ENHANCED WIDEN] High RAM mode ({ram_available_gb:.1f}GB): Optimized CPU processing")
     else:
-        print(f"[ENHANCED WIDEN] Standard mode ({ram_available_gb:.1f}GB): CPU processing")
+        pass  # print(f"[ENHANCED WIDEN] Standard mode ({ram_available_gb:.1f}GB): CPU processing")
     
-    print(f"[ENHANCED WIDEN] All processing on CPU for maximum efficiency and WIDEN validation")
+    # print(f"[ENHANCED WIDEN] All processing on CPU for maximum efficiency and WIDEN validation")
+    
+    # Memory debugging: Track where the 58GB spike occurs
     
     # Create task vectors efficiently (these contain the deltas we need)
-    print("[ENHANCED WIDEN] Creating TaskVectors for delta computation...")
+    print("[ENHANCED WIDEN] Creating TaskVectors...")
     monitor_memory_usage("PRE-TASKVECTOR")
-    models_to_merge_task_vectors = [
-        TaskVector(merged_model, model_to_merge, exclude_param_names_regex) 
-        for model_to_merge in models_to_merge
-    ]
+    
+    # CRITICAL MEMORY OPTIMIZATION: Create TaskVectors one at a time to minimize peak usage
+    # print("[MEMORY OPTIMIZATION] Creating TaskVectors one at a time to minimize peak memory usage")
+    models_to_merge_task_vectors = []
+    
+    for i, model_to_merge in enumerate(models_to_merge):
+        # print(f"[MEMORY DEBUG] Creating TaskVector {i+1}/{len(models_to_merge)}")
+        monitor_memory_usage(f"PRE-TASKVECTOR-{i}")
+        
+        # Create TaskVector (this will temporarily use ~6.5GB)
+        tv = TaskVector(merged_model, model_to_merge, exclude_param_names_regex)
+        monitor_memory_usage(f"TASKVECTOR-CREATED-{i}")
+        
+        # Debug the TaskVector memory usage
+        debug_tensor_memory(tv.task_vector_param_dict, f"TaskVector-{i}")
+        
+        models_to_merge_task_vectors.append(tv)
+        
+        # Force cleanup immediately after each TaskVector creation
+        del model_to_merge  # Remove reference to the large model
+        aggressive_memory_cleanup()
+        monitor_memory_usage(f"POST-TASKVECTOR-{i}")
+        
+        # print(f"[MEMORY DEBUG] TaskVector {i+1} complete, total TaskVectors: {len(models_to_merge_task_vectors)}")
     
     # Immediate cleanup after TaskVector creation to free model references
     monitor_memory_usage("POST-TASKVECTOR")
@@ -195,24 +226,44 @@ def enhanced_widen_merging_with_dynamic_strength(
         torch.cuda.empty_cache()
     monitor_memory_usage("POST-TASKVECTOR-CLEANUP")
     
-    # Create minimal pretrained parameter reference (only what we need for final merging)
-    print("[ENHANCED WIDEN] Creating minimal parameter reference...")
-    pretrained_param_dict = {}
-    for param_name, param_value in merged_model.named_parameters():
-        pretrained_param_dict[param_name] = param_value.detach().to(storage_device).float()
+    # MEMORY OPTIMIZATION: Don't create full parameter copy - access original model directly
+    # print("[ENHANCED WIDEN] Using direct model parameter access to minimize memory...")
+    # pretrained_param_dict = {} - REMOVED to save 6.5GB
+    # Instead, we'll access merged_model.named_parameters() directly when needed
     
     # Transpose token embeddings in TaskVectors only (we don't need separate copies)
     for task_vector in models_to_merge_task_vectors:
         _transpose_token_embeddings(task_vector.task_vector_param_dict)
-    _transpose_token_embeddings(pretrained_param_dict)  # Only transpose our minimal reference
+    # Note: We'll handle transposition when accessing merged_model parameters directly
+    
+    # Helper function to get parameter directly from model (saves 6.5GB of memory)
+    def get_base_param(param_name, device=storage_device):
+        """Get parameter directly from base model without storing full copy"""
+        for name, param in merged_model.named_parameters():
+            if name == param_name:
+                result = param.detach().to(device).float()
+                # Apply transpose if needed
+                if param_name == "model.embed_tokens.weight":
+                    result = result.transpose(dim0=0, dim1=1)
+                return result
+        raise KeyError(f"Parameter {param_name} not found in base model")
+    
+    # Get list of parameter names for processing
+    param_names_in_model = [name for name, _ in merged_model.named_parameters()]
     
     with torch.no_grad():
-        print("[ENHANCED WIDEN] Computing magnitude and direction differences from TaskVector deltas...")
+        print("[ENHANCED WIDEN] Computing differences...")
         
         # Step 1: Use TaskVector deltas directly instead of recomputing everything
+        # print("[MEMORY DEBUG] Computing magnitude and direction differences - THIS MAY BE THE 58GB SPIKE SOURCE")
+        monitor_memory_usage("PRE-MAGNITUDE-DIRECTION")
+        
         models_to_merge_param_magnitude_direction_diff_tuples = []
         
-        for task_vector in models_to_merge_task_vectors:
+        for tv_idx, task_vector in enumerate(models_to_merge_task_vectors):
+            # print(f"[MEMORY DEBUG] Processing TaskVector {tv_idx+1}/{len(models_to_merge_task_vectors)} for magnitude/direction")
+            monitor_memory_usage(f"PRE-MAGNITUDE-DIRECTION-TV{tv_idx}")
+            
             # Compute magnitude and direction differences directly from deltas
             magnitude_diffs = {}
             direction_diffs = {}
@@ -246,10 +297,16 @@ def enhanced_widen_merging_with_dynamic_strength(
             
             models_to_merge_param_magnitude_direction_diff_tuples.append((magnitude_diffs, direction_diffs))
             
+            # Debug the magnitude/direction diffs memory usage
+            debug_tensor_memory(magnitude_diffs, f"MagnitudeDiffs-TV{tv_idx}")
+            debug_tensor_memory(direction_diffs, f"DirectionDiffs-TV{tv_idx}")
+            
+            monitor_memory_usage(f"POST-MAGNITUDE-DIRECTION-TV{tv_idx}")
+            
             # Cleanup intermediate tensors after each model to prevent accumulation
             del magnitude_diffs, direction_diffs
         
-        print(f"[ENHANCED WIDEN] Computed differences for {len(models_to_merge_task_vectors)} models efficiently")
+        print(f"[ENHANCED WIDEN] Computed differences for {len(models_to_merge_task_vectors)} models")
         
         # Cleanup after magnitude/direction computation
         gc.collect()
@@ -259,7 +316,7 @@ def enhanced_widen_merging_with_dynamic_strength(
         # Step 2: Enhanced parameter merging with dynamic compatibility-based strength
         merged_params = _merge_param_magnitude_direction_with_dynamic_strength(
             models_to_merge_param_magnitude_direction_diff_tuples,
-            pretrained_param_dict,
+            get_base_param,  # Pass function instead of full parameter dict
             models_to_merge_task_vectors,
             exclude_param_names_regex,
             importance_threshold,
@@ -271,7 +328,8 @@ def enhanced_widen_merging_with_dynamic_strength(
             computation_device,
             target_device,
             storage_device,
-            ranking_device
+            ranking_device,
+            param_names_in_model
         )
         
         # Transpose back
@@ -391,10 +449,11 @@ def _compute_importance_scores(input_significance_tensor, above_average_value_ra
         _compute_importance_scores.debug_count = 1
     
     if debug_scores:
-        print(f"[SCORE DEBUG] Input tensor shape: {input_significance_tensor.shape}")
-        print(f"[SCORE DEBUG] Input tensor min/max: {input_significance_tensor.min().item():.6f}/{input_significance_tensor.max().item():.6f}")
-        print(f"[SCORE DEBUG] Input tensor variance: {input_significance_tensor.var().item():.6f}")
-        print(f"[SCORE DEBUG] above_average_value_ratio: {above_average_value_ratio}, score_calibration_value: {score_calibration_value}")
+        pass  # Debug output disabled
+        # print(f"[SCORE DEBUG] Input tensor shape: {input_significance_tensor.shape}")
+        # print(f"[SCORE DEBUG] Input tensor min/max: {input_significance_tensor.min().item():.6f}/{input_significance_tensor.max().item():.6f}")
+        # print(f"[SCORE DEBUG] Input tensor variance: {input_significance_tensor.var().item():.6f}")
+        # print(f"[SCORE DEBUG] above_average_value_ratio: {above_average_value_ratio}, score_calibration_value: {score_calibration_value}")
     
     # Check if input tensor has no variation (all values identical)
     tensor_variance = input_significance_tensor.var().item()
@@ -403,7 +462,7 @@ def _compute_importance_scores(input_significance_tensor, above_average_value_ra
         uniform_score = 1.0 / input_significance_tensor.shape[0]  # Equal probability for each model
         importance_scores = torch.full_like(input_significance_tensor, uniform_score)
         if debug_scores:
-            print(f"[SCORE DEBUG] Uniform input detected (variance={tensor_variance:.2e}), using uniform scores: {uniform_score:.6f}")
+            pass  # print(f"[SCORE DEBUG] Uniform input detected (variance={tensor_variance:.2e}), using uniform scores: {uniform_score:.6f}")
         return importance_scores
     
     # Compute softmax scores for varied inputs
@@ -416,7 +475,7 @@ def _compute_importance_scores(input_significance_tensor, above_average_value_ra
         importance_scores = torch.softmax(input_significance_tensor, dim=0)
     
     if debug_scores:
-        print(f"[SCORE DEBUG] Softmax scores min/max: {importance_scores.min().item():.6f}/{importance_scores.max().item():.6f}")
+        pass  # print(f"[SCORE DEBUG] Softmax scores min/max: {importance_scores.min().item():.6f}/{importance_scores.max().item():.6f}")
     
     # Apply mask only if it won't make everything uniform
     # CRITICAL FIX: Base mask on importance_scores (after softmax), not input tensor
@@ -436,19 +495,20 @@ def _compute_importance_scores(input_significance_tensor, above_average_value_ra
         importance_scores[mask] = importance_scores[mask] * score_calibration_value
         mask_applied = True
         if debug_scores:
-            print(f"[SCORE DEBUG] Applied calibration factor {score_calibration_value} to {mask.sum().item()} values")
+            pass  # print(f"[SCORE DEBUG] Applied calibration factor {score_calibration_value} to {mask.sum().item()} values")
     else:
         mask_applied = False
         if debug_scores:
-            print(f"[SCORE DEBUG] Mask covers {mask_ratio*100:.1f}% of values - skipping to preserve score variation")
+            pass  # print(f"[SCORE DEBUG] Mask covers {mask_ratio*100:.1f}% of values - skipping to preserve score variation")
     
     if debug_scores:
-        mask_count = mask.sum().item()
-        total_count = mask.numel()
-        print(f"[SCORE DEBUG] Average threshold: {(avg_importance_scores * above_average_value_ratio).item():.6f}")
-        print(f"[SCORE DEBUG] Mask would apply to {mask_count}/{total_count} elements ({100*mask_count/total_count:.1f}%)")
-        print(f"[SCORE DEBUG] Mask actually applied: {mask_applied}")
-        print(f"[SCORE DEBUG] Final scores min/max: {importance_scores.min().item():.6f}/{importance_scores.max().item():.6f}")
+        pass  # Debug output disabled
+        # mask_count = mask.sum().item()
+        # total_count = mask.numel()
+        # print(f"[SCORE DEBUG] Average threshold: {(avg_importance_scores * above_average_value_ratio).item():.6f}")
+        # print(f"[SCORE DEBUG] Mask would apply to {mask_count}/{total_count} elements ({100*mask_count/total_count:.1f}%)")
+        # print(f"[SCORE DEBUG] Mask actually applied: {mask_applied}")
+        # print(f"[SCORE DEBUG] Final scores min/max: {importance_scores.min().item():.6f}/{importance_scores.max().item():.6f}")
     
     return importance_scores
 
@@ -476,7 +536,7 @@ def _compatibility_to_merge_strength(compatibility_score, base_merge_strength, s
 
 def _merge_param_magnitude_direction_with_dynamic_strength(
     models_to_merge_param_magnitude_direction_diff_tuples,
-    pretrained_param_dict,
+    get_base_param_func,  # Function to get parameters instead of full dict
     models_to_merge_task_vectors,
     exclude_param_names_regex,
     importance_threshold,
@@ -488,7 +548,8 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
     computation_device,
     target_device,
     storage_device,
-    ranking_device
+    ranking_device,
+    param_names_in_model
 ):
     """Enhanced parameter merging with dynamic strength based on compatibility"""
     
@@ -507,7 +568,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
     
     # Get parameters to merge
     param_names_to_merge = get_param_names_to_merge(
-        input_param_names=list(pretrained_param_dict.keys()),
+        input_param_names=param_names_in_model,  # Use passed parameter names
         exclude_param_names_regex=exclude_param_names_regex
     )
     
@@ -561,16 +622,30 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
         start_time = time.time()
         
         # Process parameters block by block to preserve WIDEN cross-parameter validation
+        print("[MEMORY DEBUG] Starting block processing - MAJOR MEMORY CONSUMER SUSPECTED HERE")
+        monitor_memory_usage("PRE-BLOCK-PROCESSING")
+        
+        profiler = get_widen_memory_profiler()
+        profiler.start()
+        profiler.checkpoint(f"Block processing started - {total_blocks} blocks, {total_params} params")
+        
         for block_idx, (block_name, block_params) in enumerate(block_groups):
             block_start_time = time.time()
+            print(f"[MEMORY DEBUG] Starting block {block_idx+1}/{total_blocks}: {block_name} ({len(block_params)} parameters)")
+            monitor_memory_usage(f"BLOCK-{block_idx+1}-START")
+            
+            profiler.checkpoint(f"Block {block_idx+1}/{total_blocks} start: {block_name}")
             print(f"[ENHANCED WIDEN] Processing block {block_idx+1}/{total_blocks}: {block_name} ({len(block_params)} parameters)")
             
-            # Batch process all parameters in this block at once for efficiency
+            # MEMORY OPTIMIZATION: Process all parameters in block together (preserves WIDEN cross-parameter evaluation)
+            # But use memory-efficient tensor operations and aggressive cleanup
             block_magnitude_diffs = {}
             block_direction_diffs = {}
             valid_params_in_block = []
             
-            # Collect all magnitude/direction diffs for this block
+            print(f"[WIDEN INTEGRITY] Processing all {len(block_params)} parameters together for cross-parameter evaluation")
+            
+            # Collect all magnitude/direction diffs for this block with memory optimization
             for param_name in block_params:
                 try:
                     magnitude_diffs = []
@@ -580,6 +655,10 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                         if param_name in models_to_merge_param_magnitude_diff_tuple[model_idx]:
                             mag_diff = models_to_merge_param_magnitude_diff_tuple[model_idx][param_name]
                             dir_diff = models_to_merge_param_direction_diff_tuple[model_idx][param_name]
+                            
+                            # Apply smart device management to minimize memory usage
+                            mag_diff = smart_device_management(mag_diff, torch.device('cpu'))
+                            dir_diff = smart_device_management(dir_diff, torch.device('cpu'))
                             
                             # Skip extremely large tensors to prevent memory issues
                             if mag_diff.numel() > 50000000:  # 50M elements
@@ -596,39 +675,76 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                         
                 except Exception as e:
                     print(f"[WARNING] Failed to collect data for {param_name}: {e}")
+                
+                # Immediate cleanup of intermediate tensors to prevent accumulation
+                del magnitude_diffs, direction_diffs
+                
+                # Gentle cleanup every 20 parameters to manage memory without breaking WIDEN evaluation
+                if len(valid_params_in_block) % 20 == 0:
+                    gentle_cleanup()
             
             # Now compute rankings for all valid parameters in this block
             print(f"[ENHANCED WIDEN]   Computing rankings for {len(valid_params_in_block)} valid parameters in block {block_name}")
             
-            for param_name in valid_params_in_block:
+            # MEMORY OPTIMIZATION: Process rankings one at a time but maintain cross-parameter visibility
+            for param_idx, param_name in enumerate(valid_params_in_block):
+                # Initialize variables to avoid scoping issues
+                mag_tensor = None
+                dir_tensor = None
+                
                 try:
-                    mag_tensor = torch.stack(block_magnitude_diffs[param_name], dim=0)
-                    dir_tensor = torch.stack(block_direction_diffs[param_name], dim=0)
+                    # Use memory-efficient tensor operations for stacking - FORCE CPU TO AVOID VRAM OOM
+                    with torch.no_grad():
+                        # Reduced logging - only log every 50 parameters to speed up processing
+                        if param_idx % 50 == 0:
+                            print(f"[MEMORY DEBUG] Processing parameter {param_idx+1}/{len(valid_params_in_block)}: {param_name}")
+                        
+                        # CRITICAL FIX: Move all tensors to CPU before stacking to avoid VRAM OOM
+                        cpu_mag_tensors = [t.cpu() if t.device.type != 'cpu' else t for t in block_magnitude_diffs[param_name]]
+                        mag_tensor = torch.stack(cpu_mag_tensors, dim=0)
+                        
+                        # CRITICAL FIX: Move all tensors to CPU before stacking to avoid VRAM OOM
+                        cpu_dir_tensors = [t.cpu() if t.device.type != 'cpu' else t for t in block_direction_diffs[param_name]]
+                        dir_tensor = torch.stack(cpu_dir_tensors, dim=0)
+                        
+                        # Keep on CPU for memory efficiency
+                        mag_tensor = mag_tensor.cpu()
+                        dir_tensor = dir_tensor.cpu()
+                    
+                    # Verify ranking shapes for WIDEN correctness (first parameter only) - BEFORE deletion
+                    if block_idx == 0 and param_name == valid_params_in_block[0]:
+                        print(f"[WIDEN VERIFICATION] Parameter '{param_name}': magnitude shape {mag_tensor.shape} -> ranking shape will be computed")
+                        print(f"[WIDEN VERIFICATION] This ranks {mag_tensor.shape[1]} features across {mag_tensor.shape[0]} models - CORRECT WIDEN behavior")
                     
                     # Compute rankings with FULL parameter visibility (critical for WIDEN)
                     magnitude_rankings[param_name] = _rank_per_param_magnitude_or_direction_within_model(mag_tensor)
                     direction_rankings[param_name] = _rank_per_param_magnitude_or_direction_within_model(dir_tensor)
                     
-                    # Verify ranking shapes for WIDEN correctness (first parameter only)
-                    if block_idx == 0 and param_name == valid_params_in_block[0]:
-                        print(f"[WIDEN VERIFICATION] Parameter '{param_name}': magnitude shape {mag_tensor.shape} -> ranking shape {magnitude_rankings[param_name].shape}")
-                        print(f"[WIDEN VERIFICATION] This ranks {mag_tensor.shape[1]} features across {mag_tensor.shape[0]} models - CORRECT WIDEN behavior")
-                    
-                    # Free memory immediately
-                    del mag_tensor, dir_tensor
+                    # Reduced cleanup frequency - every 50 parameters to speed up processing
+                    if param_idx % 50 == 0:
+                        aggressive_memory_cleanup()
+                        profiler.checkpoint(f"Cleanup at param {param_idx} in {block_name}")
                     
                 except Exception as e:
                     print(f"[WARNING] Failed to compute rankings for {param_name}: {e}")
+                
+                finally:
+                    # IMMEDIATE cleanup of large tensors after each parameter - even on failure
+                    if mag_tensor is not None:
+                        del mag_tensor
+                    if dir_tensor is not None:
+                        del dir_tensor
             
             # Clean up block data
             del block_magnitude_diffs, block_direction_diffs
             
             # Block timing and cleanup
             block_time = time.time() - block_start_time
+            profiler.checkpoint(f"Block {block_idx+1}/{total_blocks} complete: {block_name} ({block_time:.1f}s)")
             print(f"[ENHANCED WIDEN] Block {block_name} completed in {block_time:.1f}s")
             
-            # Light cleanup after each block group
-            gentle_cleanup()
+            # Clean up after each block's ranking computation - this is when memory is allocated
+            gentle_cleanup()  # Clean up intermediate ranking tensors and computations
     
     print(f"[ENHANCED WIDEN] Phase 1 complete: Rankings computed for {len(magnitude_rankings)} parameters")
     
@@ -679,6 +795,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
     for block_idx, (block_name, block_params) in enumerate(phase2_block_groups):
         processed_block_count += 1
         ram_gb = check_memory_status()
+        profiler.checkpoint(f"Phase2 Block {processed_block_count}/{total_phase2_blocks} start: {block_name}")
         print(f"[ENHANCED WIDEN] Phase 2 - Processing block {processed_block_count}/{total_phase2_blocks}: {block_name} ({len(block_params)} parameters) [RAM: {ram_gb:.1f}GB]")
         
         for param_name in block_params:
@@ -695,15 +812,20 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                     for models_to_merge_task_vector in models_to_merge_task_vectors:
                         if param_name in models_to_merge_task_vector.task_vector_param_dict:
                             delta = models_to_merge_task_vector.task_vector_param_dict[param_name]
-                            # Move to computation device for processing
-                            delta_tensors.append(delta.to(computation_device))
+                            # Use smart device management for memory efficiency
+                            delta = smart_device_management(delta, computation_device)
+                            delta_tensors.append(delta)
                     
                     if not delta_tensors:
                         print(f"[WARNING] No delta tensors found for {param_name}, skipping")
-                        merged_params[param_name] = pretrained_param_dict[param_name].to(target_device)
+                        merged_params[param_name] = get_base_param_func(param_name, target_device)
                         continue
-                        
-                    models_to_merge_delta_param = torch.stack(delta_tensors, dim=0)
+                    
+                    # Memory-efficient tensor stacking with no_grad context
+                    with torch.no_grad():
+                        models_to_merge_delta_param = torch.stack(delta_tensors, dim=0)
+                        # Clear delta_tensors immediately to free memory
+                        del delta_tensors
                     
                     # Use precomputed rankings (move to computation device if needed)
                     models_to_merge_param_magnitude_rank = magnitude_rankings[param_name].to(computation_device)
@@ -740,7 +862,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                         widen_diagnostics['varied_score_count'] += 1
                 else:
                     # Skip parameters that don't have rankings (shouldn't happen if magnitude/direction computation worked)
-                    merged_params[param_name] = pretrained_param_dict[param_name].to(target_device)
+                    merged_params[param_name] = get_base_param_func(param_name, target_device)
                     no_rankings_count += 1
                     processed_count += 1
                     widen_diagnostics['parameters_skipped_no_rankings'] += 1
@@ -783,7 +905,7 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                     
                     if should_skip:
                         # Skipping parameter with low compatibility score
-                        merged_params[param_name] = pretrained_param_dict[param_name].to(target_device)
+                        merged_params[param_name] = get_base_param_func(param_name, target_device)
                         skipped_count += 1
                         processed_count += 1
                         widen_diagnostics['parameters_skipped_threshold'] += 1
@@ -817,12 +939,18 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                     # Fallback to simple averaging if weighting fails
                     merged_delta_param = models_to_merge_delta_param.mean(dim=0)
                 
-                merged_param = pretrained_param_dict[param_name].to(computation_device) + merged_delta_param * merge_strength
+                # Use memory-efficient tensor addition
+                base_param = get_base_param_func(param_name, computation_device)
+                merged_param = memory_efficient_tensor_ops(
+                    base_param, 
+                    merged_delta_param * merge_strength, 
+                    "add"
+                )
                 
                 # Apply renormalization if enabled
                 if hasattr(merged_param, 'shape') and normalization_mode != "none":
                     try:
-                        base_param_for_renorm = pretrained_param_dict[param_name].to(computation_device)
+                        base_param_for_renorm = get_base_param_func(param_name, computation_device)
                         if normalization_mode == "calibrate":
                             # Use conservative calibrate parameters
                             merged_param = calibrate_renormalize(merged_param, base_param_for_renorm, normalization_mode, 0.3, 1.1)
@@ -848,9 +976,16 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 except:
                     pass
                     
-                # Periodic light cleanup to prevent memory buildup
-                if processed_count % 100 == 0:  # Reduced frequency from 50 to 100
-                    gentle_cleanup()
+                # Clean up parameter-specific variables after each parameter merge
+                try:
+                    # Clean up variables that were created for this parameter
+                    del models_to_merge_param_magnitude_rank, models_to_merge_param_direction_rank
+                    if 'models_to_merge_delta_param' in locals():
+                        del models_to_merge_delta_param
+                    if 'delta_tensors' in locals():
+                        del delta_tensors
+                except:
+                    pass
                     
             except Exception as e:
                 print(f"[ERROR] Failed to merge parameter {param_name}: {e}")
@@ -863,6 +998,16 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                 
                 # Light cleanup on errors
                 gentle_cleanup()
+        
+        # Block completion checkpoint and cleanup
+        profiler.checkpoint(f"Phase2 Block {processed_block_count}/{total_phase2_blocks} complete: {block_name}")
+        
+        # Clean up after each Phase 2 block - this is when parameter merging allocations happen
+        gentle_cleanup()  # Clean up intermediate merge computations
+    
+    # Finalize memory profiling
+    profiler.checkpoint("WIDEN merge processing complete")
+    memory_summary = profiler.finish()
     
     # Calculate actual merge statistics
     total_merged_count = len(merged_params)
@@ -924,24 +1069,51 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
     else:
         print(f"[ENHANCED WIDEN] ✓ All parameters processed - WIDEN merge integrity maintained")
     
-    # Aggressive memory cleanup to prevent crashes
+    # COMPREHENSIVE MEMORY CLEANUP - Essential for large models
+    # Clean up all intermediate data structures
+    cleanup_items = [
+        'models_to_merge_param_magnitude_direction_diff_tuples',
+        'models_to_merge_task_vectors', 
+        'magnitude_rankings',
+        'direction_rankings',
+        'models_to_merge_param_magnitude_diff_tuple',
+        'models_to_merge_param_direction_diff_tuple',
+        'param_names_merged_by_magnitude_direction'
+    ]
+    
+    for item_name in cleanup_items:
+        try:
+            if item_name in locals():
+                del locals()[item_name]
+        except: pass
+    
+    # Clear TaskVector parameters explicitly
     try:
-        del models_to_merge_param_magnitude_direction_diff_tuples
-    except: pass
-    try:
-        del pretrained_param_dict
-    except: pass
-    try:
-        del models_to_merge_task_vectors
+        if 'models_to_merge_task_vectors' in locals():
+            for tv in models_to_merge_task_vectors:
+                if hasattr(tv, 'task_vector_param_dict'):
+                    tv.task_vector_param_dict.clear()
+            del models_to_merge_task_vectors
     except: pass
     
-    # Clear any remaining local variables that might hold references
+    # Force comprehensive garbage collection
     import gc
     gc.collect()
     gc.collect()  # Double collection for stubborn references
+    gc.collect()  # Triple collection for very stubborn references
+    
+    # CUDA memory cleanup
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()  # Wait for GPU operations to complete
+        torch.cuda.empty_cache()  # Second clear after sync
+    
+    # Final memory check
+    try:
+        import psutil
+        final_ram = psutil.virtual_memory().used / (1024**3)
+        print(f"[ENHANCED WIDEN] Cleanup complete - Final RAM: {final_ram:.2f}GB")
+    except: pass
     
     return merged_params, widen_diagnostics
 
@@ -1337,21 +1509,212 @@ def gentle_cleanup():
     gc.collect()
     # No CUDA operations to avoid allocator stress
 
+def aggressive_memory_cleanup():
+    """Aggressive memory cleanup for critical memory optimization"""
+    # Clear optimized cache
+    cache = get_optimized_cache()
+    cache.clear()
+    
+    # Force garbage collection
+    gc.collect()
+    
+    # Clear CUDA cache if available
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()  # Ensure all operations complete
+
 def monitor_memory_usage(label=""):
     """Monitor memory usage for debugging"""
     try:
         import psutil
         process = psutil.Process()
         ram_mb = process.memory_info().rss / 1024 / 1024
+        ram_gb = ram_mb / 1024
+        
+        # Also get system memory info
+        system_memory = psutil.virtual_memory()
+        system_ram_gb = system_memory.used / (1024**3)
         
         if torch.cuda.is_available():
             gpu_allocated = torch.cuda.memory_allocated() / 1024 / 1024
             gpu_reserved = torch.cuda.memory_reserved() / 1024 / 1024
-            print(f"[MEMORY-{label}] RAM: {ram_mb:.1f}MB, GPU: {gpu_allocated:.1f}MB allocated, {gpu_reserved:.1f}MB reserved")
+            gpu_allocated_gb = gpu_allocated / 1024
+            print(f"[MEMORY-{label}] Process RAM: {ram_gb:.2f}GB, System RAM: {system_ram_gb:.2f}GB, VRAM: {gpu_allocated_gb:.2f}GB allocated, {gpu_reserved/1024:.2f}GB reserved")
         else:
-            print(f"[MEMORY-{label}] RAM: {ram_mb:.1f}MB")
+            print(f"[MEMORY-{label}] Process RAM: {ram_gb:.2f}GB, System RAM: {system_ram_gb:.2f}GB")
+        
+        # Track memory spikes
+        if hasattr(monitor_memory_usage, 'last_system_ram'):
+            delta = system_ram_gb - monitor_memory_usage.last_system_ram
+            if abs(delta) > 2.0:  # Alert on 2GB+ changes
+                print(f"[MEMORY SPIKE-{label}] System RAM changed by {delta:+.2f}GB")
+        monitor_memory_usage.last_system_ram = system_ram_gb
+        
     except Exception as e:
         print(f"[MEMORY-{label}] Monitor failed: {e}")
+
+def debug_tensor_memory(tensor_dict, label=""):
+    """Debug memory usage of tensor dictionaries"""
+    try:
+        total_memory_gb = 0
+        tensor_count = 0
+        largest_tensor = None
+        largest_size = 0
+        
+        for name, tensor in tensor_dict.items():
+            if hasattr(tensor, 'element_size') and hasattr(tensor, 'nelement'):
+                size_bytes = tensor.element_size() * tensor.nelement()
+                size_gb = size_bytes / (1024**3)
+                total_memory_gb += size_gb
+                tensor_count += 1
+                
+                if size_gb > largest_size:
+                    largest_size = size_gb
+                    largest_tensor = name
+        
+        print(f"[TENSOR DEBUG-{label}] {tensor_count} tensors, Total: {total_memory_gb:.2f}GB, Largest: {largest_tensor} ({largest_size:.2f}GB)")
+        
+        if total_memory_gb > 10:
+            print(f"[TENSOR ALERT-{label}] Large tensor dict detected: {total_memory_gb:.2f}GB")
+            # Print top 5 largest tensors
+            tensor_sizes = []
+            for name, tensor in tensor_dict.items():
+                if hasattr(tensor, 'element_size') and hasattr(tensor, 'nelement'):
+                    size_bytes = tensor.element_size() * tensor.nelement()
+                    size_gb = size_bytes / (1024**3)
+                    tensor_sizes.append((name, size_gb))
+            
+            tensor_sizes.sort(key=lambda x: x[1], reverse=True)
+            print(f"[TENSOR ALERT-{label}] Top 5 largest tensors:")
+            for i, (name, size) in enumerate(tensor_sizes[:5]):
+                print(f"  {i+1}. {name}: {size:.2f}GB")
+                
+    except Exception as e:
+        print(f"[TENSOR DEBUG-{label}] Failed: {e}")
+
+# Global memory profiler for WIDEN merge operations
+_WIDEN_MEMORY_PROFILER = None
+
+def get_widen_memory_profiler():
+    """Get or create the global WIDEN memory profiler"""
+    global _WIDEN_MEMORY_PROFILER
+    if _WIDEN_MEMORY_PROFILER is None:
+        _WIDEN_MEMORY_PROFILER = MemoryProfiler("WIDEN_MERGE")
+    return _WIDEN_MEMORY_PROFILER
+
+def ultra_memory_efficient_widen_merge(
+    merged_model, models_to_merge, exclude_param_names_regex,
+    importance_threshold, importance_boost, base_merge_strength,
+    rank_sensitivity, skip_threshold, normalization_mode,
+    computation_device, target_device, storage_device
+):
+    """Ultra memory-efficient WIDEN merge - processes parameters one at a time"""
+    
+    print("[ULTRA MEMORY] Starting ultra memory-efficient WIDEN merge")
+    initial_memory = psutil.virtual_memory().used / (1024**3)
+    print(f"[ULTRA MEMORY] Initial RAM: {initial_memory:.2f}GB")
+    
+    # Get parameter names to process
+    param_names_to_merge = []
+    for name, _ in merged_model.named_parameters():
+        if not exclude_param_names_regex or not exclude_param_names_regex.search(name):
+            param_names_to_merge.append(name)
+    
+    print(f"[ULTRA MEMORY] Processing {len(param_names_to_merge)} parameters one at a time")
+    
+    merged_params = {}
+    processed_count = 0
+    peak_memory = initial_memory
+    
+    # Process each parameter individually to minimize memory usage
+    for param_idx, param_name in enumerate(param_names_to_merge):
+        try:
+            # Get base parameter
+            base_param = None
+            for name, param in merged_model.named_parameters():
+                if name == param_name:
+                    base_param = param.detach().to(storage_device).float()
+                    if param_name == "model.embed_tokens.weight":
+                        base_param = base_param.transpose(dim0=0, dim1=1)
+                    break
+            
+            if base_param is None:
+                continue
+            
+            # Create deltas one at a time
+            delta_tensors = []
+            for model_to_merge in models_to_merge:
+                other_param = None
+                for name, param in model_to_merge.named_parameters():
+                    if name == param_name:
+                        other_param = param.detach().to(storage_device).float()
+                        if param_name == "model.embed_tokens.weight":
+                            other_param = other_param.transpose(dim0=0, dim1=1)
+                        break
+                
+                if other_param is not None:
+                    delta = other_param - base_param
+                    delta_tensors.append(delta.to(computation_device))
+                    del other_param
+            
+            if not delta_tensors:
+                merged_params[param_name] = base_param.to(target_device)
+                processed_count += 1
+                continue
+            
+            # Simple weighted merge (simplified WIDEN)
+            with torch.no_grad():
+                deltas_tensor = torch.stack(delta_tensors, dim=0)
+                
+                # Simplified importance scoring
+                if deltas_tensor.dim() > 1:
+                    magnitudes = torch.norm(deltas_tensor, p=2, dim=tuple(range(1, deltas_tensor.dim())))
+                    importance_scores = magnitudes / (magnitudes.max() + 1e-8)
+                    
+                    # Apply importance boost to top features
+                    top_k = max(1, int(len(importance_scores) * importance_threshold / 100.0))
+                    top_indices = torch.argsort(importance_scores, descending=True)[:top_k]
+                    
+                    weights = torch.ones_like(importance_scores) * 0.1
+                    weights[top_indices] = importance_boost
+                    
+                    # Weighted merge
+                    weighted_deltas = deltas_tensor * weights.view(-1, *([1] * (deltas_tensor.dim() - 1)))
+                    merged_delta = weighted_deltas.sum(dim=0)
+                else:
+                    merged_delta = deltas_tensor.mean(dim=0)
+                
+                merged_param = base_param.to(computation_device) + merged_delta * base_merge_strength
+                merged_params[param_name] = merged_param.to(target_device)
+                
+                del deltas_tensor, delta_tensors, merged_delta, merged_param
+            
+            processed_count += 1
+            
+            # Monitor memory and cleanup periodically
+            if param_idx % 20 == 0:
+                current_memory = psutil.virtual_memory().used / (1024**3)
+                peak_memory = max(peak_memory, current_memory)
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                print(f"[ULTRA MEMORY] Progress: {param_idx}/{len(param_names_to_merge)}, RAM: {current_memory:.2f}GB")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to process {param_name}: {e}")
+            processed_count += 1
+    
+    final_memory = psutil.virtual_memory().used / (1024**3)
+    total_memory_used = peak_memory - initial_memory
+    
+    print(f"[ULTRA MEMORY] Complete! Processed: {processed_count}/{len(param_names_to_merge)}")
+    print(f"[ULTRA MEMORY] Peak RAM: {peak_memory:.2f}GB (Δ{total_memory_used:+.2f}GB)")
+    
+    # Transpose back
+    if "model.embed_tokens.weight" in merged_params:
+        merged_params["model.embed_tokens.weight"] = merged_params["model.embed_tokens.weight"].transpose(dim0=0, dim1=1)
+    
+    return merged_params
 
 class MemoryExhaustionError(Exception):
     pass
@@ -2594,9 +2957,11 @@ class DonutWidenMergeUNet:
                     else:  # Regular model
                         other_model_objs.append(model.model)
 
-                # FIXED: Use deepcopy only for the wrapper, not the heavy model tensors
+                # FIXED: Memory-efficient model cloning to avoid GPU OOM
+                # Instead of deepcopy which duplicates all tensors in VRAM, just copy the wrapper
                 model_merged = copy.copy(model_base)  # Shallow copy of wrapper
-                model_merged.model = copy.deepcopy(base_model_obj)  # Deep copy only the model
+                # Keep reference to original model - we'll update parameters in-place later
+                # This avoids the VRAM spike from deepcopy
 
                 # Use enhanced WIDEN merger with dynamic compatibility
                 print("[DonutWidenMergeUNet] Using WIDEN merge with dynamic compatibility-based strength...")
@@ -2943,17 +3308,20 @@ class DonutWidenMergeCLIP:
                         if enc:
                             other_encs.append(enc)
 
-                # FIXED: Use deepcopy only for the wrapper, not the heavy model tensors
+                # FIXED: Memory-efficient clip cloning to avoid GPU OOM
+                # Instead of deepcopy which duplicates all tensors in VRAM, just copy the wrapper
                 clip_merged = copy.copy(clip_base)  # Shallow copy of wrapper
-                enc_merged = copy.deepcopy(base_enc)  # Deep copy only the encoder
+                # Keep reference to original encoder - we'll update parameters in-place later
+                # This avoids the VRAM spike from deepcopy
+                enc_merged = base_enc  # Use the base encoder directly for merging
 
-                # Set the copied encoder back to the merged clip
+                # Set the original encoder back to the merged clip (no deep copy needed)
                 if hasattr(clip_merged, "model"):
-                    clip_merged.model = enc_merged
+                    clip_merged.model = base_enc
                 elif hasattr(clip_merged, "clip"):
-                    clip_merged.clip = enc_merged
+                    clip_merged.clip = base_enc
                 elif hasattr(clip_merged, "cond_stage_model"):
-                    clip_merged.cond_stage_model = enc_merged
+                    clip_merged.cond_stage_model = base_enc
 
                 # Use enhanced WIDEN merger with dynamic compatibility
                 print("[DonutWidenMergeCLIP] Using WIDEN merge with dynamic compatibility-based strength...")
