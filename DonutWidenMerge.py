@@ -136,6 +136,8 @@ def enhanced_widen_merging_with_dynamic_strength(
     rank_sensitivity,
     skip_threshold,
     normalization_mode,
+    calibrate_threshold=0.3,
+    normalization_scaling=1.1,
     ultra_memory_mode=False
 ):
     """Enhanced WIDEN merging with dynamic compatibility-based merge strength"""
@@ -952,9 +954,12 @@ def _merge_param_magnitude_direction_with_dynamic_strength(
                     try:
                         base_param_for_renorm = get_base_param_func(param_name, computation_device)
                         if normalization_mode == "calibrate":
-                            # Use conservative calibrate parameters
-                            merged_param = calibrate_renormalize(merged_param, base_param_for_renorm, normalization_mode, 0.3, 1.1)
-                        else:  # magnitude
+                            # Use user-configurable calibrate parameters
+                            merged_param = calibrate_renormalize(merged_param, base_param_for_renorm, normalization_mode, calibrate_threshold, normalization_scaling)
+                        elif normalization_mode == "magnitude":
+                            # Use user-configurable magnitude scaling (only 's' parameter used for magnitude)
+                            merged_param = calibrate_renormalize(merged_param, base_param_for_renorm, normalization_mode, 1.0, normalization_scaling)
+                        else:  # none
                             merged_param = calibrate_renormalize(merged_param, base_param_for_renorm, normalization_mode, 1.0, 1.0)
                     except Exception as e:
                         # Silent renormalization failure - continue with non-renormalized parameter
@@ -1392,14 +1397,17 @@ class LoRAStackProcessor:
 
 # Global cache for preventing redundant processing
 _MERGE_CACHE = {}
+_STAGED_CACHE = {}  # For fast adjustment feature: stores intermediate results
 _CACHE_MAX_SIZE = 3  # Reduced from 10 to prevent memory bloat
 
 def clear_session_cache():
     """Clear global merge cache for fresh session start"""
-    global _MERGE_CACHE
-    if _MERGE_CACHE:
-        print(f"[Session] Clearing {len(_MERGE_CACHE)} cached merge results")
+    global _MERGE_CACHE, _STAGED_CACHE
+    total_items = len(_MERGE_CACHE) + len(_STAGED_CACHE)
+    if total_items > 0:
+        print(f"[Session] Clearing {len(_MERGE_CACHE)} cached merge results and {len(_STAGED_CACHE)} staged results")
         _MERGE_CACHE.clear()
+        _STAGED_CACHE.clear()
         # Light cleanup after cache clear
         gc.collect()
         if torch.cuda.is_available():
@@ -1442,7 +1450,7 @@ def check_memory_safety():
     except Exception:
         return True, 0.0, 999.0
 
-def compute_merge_hash(models, merge_strength, importance_threshold, importance_boost, rank_sensitivity, skip_threshold, normalization_mode):
+def compute_merge_hash(models, merge_strength, importance_threshold, importance_boost, rank_sensitivity, skip_threshold, normalization_mode, calibrate_threshold=0.3, normalization_scaling=1.1):
     """Compute hash of merge parameters to detect changes - FIXED: More robust hashing"""
     hasher = hashlib.sha256()  # Changed from md5 to sha256 for better collision resistance
 
@@ -1471,7 +1479,7 @@ def compute_merge_hash(models, merge_strength, importance_threshold, importance_
                 hasher.update(f"{id(model)}_{time.time()}".encode())
 
     # Hash merge parameters
-    hasher.update(f"{merge_strength}_{importance_threshold}_{importance_boost}_{rank_sensitivity}_{skip_threshold}_{normalization_mode}".encode())
+    hasher.update(f"{merge_strength}_{importance_threshold}_{importance_boost}_{rank_sensitivity}_{skip_threshold}_{normalization_mode}_{calibrate_threshold}_{normalization_scaling}".encode())
 
     return hasher.hexdigest()
 
@@ -1496,6 +1504,73 @@ def store_merge_result(cache_key, result):
 
     _MERGE_CACHE[cache_key] = result
     print(f"[Cache] Stored merge result, cache size: {len(_MERGE_CACHE)}")
+
+def compute_stage1_hash(models, importance_threshold, importance_boost, rank_sensitivity, skip_threshold):
+    """Compute hash for expensive operations (rankings, importance scores)"""
+    hasher = hashlib.sha256()
+    
+    # Hash model inputs
+    for model in models:
+        if model is not None:
+            try:
+                model_state = model.model.state_dict() if hasattr(model, 'model') else model.state_dict()
+                for name, param in list(model_state.items())[:5]:  # Sample first 5 params
+                    param_hash = hashlib.sha256(param.detach().cpu().numpy().tobytes()).hexdigest()[:16]
+                    hasher.update(param_hash.encode())
+                    break  # Just use first param for speed
+            except Exception:
+                hasher.update(f"{id(model)}_{time.time()}".encode())
+    
+    # Hash stage 1 parameters (everything except merge_strength and normalization)
+    hasher.update(f"{importance_threshold}_{importance_boost}_{rank_sensitivity}_{skip_threshold}".encode())
+    return hasher.hexdigest()
+
+def check_staged_cache(stage1_key):
+    """Check if we have cached intermediate results for fast adjustment"""
+    if stage1_key in _STAGED_CACHE:
+        print("[Staged Cache] Found cached intermediate results - enabling fast adjustment")
+        return _STAGED_CACHE[stage1_key]
+    return None
+
+def store_staged_result(stage1_key, base_params, merged_deltas):
+    """Store intermediate results for fast adjustment"""
+    global _STAGED_CACHE
+    # Clear old entries if cache is full
+    if len(_STAGED_CACHE) >= _CACHE_MAX_SIZE:
+        oldest_key = next(iter(_STAGED_CACHE))
+        del _STAGED_CACHE[oldest_key]
+        gc.collect()
+        print(f"[Staged Cache] Removed oldest entry, cache size: {len(_STAGED_CACHE)}")
+    
+    _STAGED_CACHE[stage1_key] = {
+        'base_params': base_params,
+        'merged_deltas': merged_deltas
+    }
+    print(f"[Staged Cache] Stored intermediate results, cache size: {len(_STAGED_CACHE)}")
+
+def apply_fast_adjustments(base_params, merged_deltas, merge_strength, normalization_mode, 
+                          calibrate_threshold, normalization_scaling):
+    """Apply merge strength and normalization to cached intermediate results"""
+    print(f"[Fast Adjustment] Applying strength={merge_strength}, norm={normalization_mode}")
+    
+    final_params = {}
+    for param_name in base_params:
+        base_param = base_params[param_name]
+        merged_delta = merged_deltas[param_name]
+        
+        # Apply merge strength: final = base + delta * strength
+        final_merged = base_param + merged_delta * merge_strength
+        
+        # Apply normalization
+        if normalization_mode != "none":
+            final_merged = calibrate_renormalize(
+                final_merged, base_param, normalization_mode, 
+                calibrate_threshold, normalization_scaling
+            )
+        
+        final_params[param_name] = final_merged
+    
+    return final_params
 
 def force_cleanup():
     """Conservative memory cleanup to prevent CUDA allocator conflicts"""
@@ -1606,6 +1681,7 @@ def ultra_memory_efficient_widen_merge(
     merged_model, models_to_merge, exclude_param_names_regex,
     importance_threshold, importance_boost, base_merge_strength,
     rank_sensitivity, skip_threshold, normalization_mode,
+    calibrate_threshold, normalization_scaling,
     computation_device, target_device, storage_device
 ):
     """Ultra memory-efficient WIDEN merge - processes parameters one at a time"""
@@ -1735,11 +1811,17 @@ def calibrate_renormalize(merged_param, base_param, mode="calibrate", t=1.0, s=1
         return merged_param
 
     elif mode == "magnitude":
-        # Simple magnitude preservation (original method)
+        # Magnitude preservation with optional scaling control
         base_norm = torch.norm(base_param)
         merged_norm = torch.norm(merged_param)
         if merged_norm > 1e-8:  # Avoid division by zero
-            return merged_param * (base_norm / merged_norm)
+            # Apply magnitude scaling factor (s parameter)
+            # s=1.0 = exact magnitude preservation
+            # s>1.0 = amplify merged magnitude 
+            # s<1.0 = reduce merged magnitude
+            scaling_factor = max(0.1, min(3.0, s))  # Clamp between 0.1-3.0
+            target_norm = base_norm * scaling_factor
+            return merged_param * (target_norm / merged_norm)
         return merged_param
 
     elif mode == "calibrate":
@@ -2712,12 +2794,17 @@ class MergingMethod:
                 if renorm_mode != "none":
                     try:
                         if renorm_mode == "calibrate":
-                            # FIXED: More conservative calibrate parameters
-                            # t=0.3 (lower = more selective), s=1.1 (lower = less aggressive scaling)
+                            # Use user-configurable calibrate parameters
+                            # t (threshold/temperature), s (scaling intensity)
                             final_merged = calibrate_renormalize(
-                                final_merged, base_param, renorm_mode, 0.3, 1.1
+                                final_merged, base_param, renorm_mode, calibrate_threshold, normalization_scaling
                             )
-                        else:  # magnitude
+                        elif renorm_mode == "magnitude":
+                            # Use user-configurable magnitude scaling (only 's' parameter used for magnitude)
+                            final_merged = calibrate_renormalize(
+                                final_merged, base_param, renorm_mode, 1.0, normalization_scaling
+                            )
+                        else:  # none
                             final_merged = calibrate_renormalize(
                                 final_merged, base_param, renorm_mode, 1.0, 1.0
                             )
@@ -2860,6 +2947,9 @@ class DonutWidenMergeUNet:
                 "model_other": ("MODEL",),
                 "merge_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 3.0, "step": 0.1}),
                 "normalization_mode": (["magnitude", "calibrate", "none"], {"default": "magnitude"}),  # (renorm_mode)
+                "calibrate_threshold": ("FLOAT", {"default": 0.3, "min": 0.1, "max": 1.0, "step": 0.05}),  # t parameter for calibrate mode only
+                "normalization_scaling": ("FLOAT", {"default": 1.1, "min": 0.1, "max": 3.0, "step": 0.1}),  # scaling for both magnitude and calibrate modes
+                "enable_fast_adjustment": ("BOOLEAN", {"default": False}),  # Enable post-merge parameter adjustment
                 # Enhanced WIDEN parameters
                 "importance_threshold": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 500.0, "step": 0.1}),  # (above_average_value_ratio)
                 "importance_boost": ("FLOAT", {"default": 2.5, "min": 0.0, "max": 3.0, "step": 0.1}),  # (score_calibration_value)
@@ -2888,6 +2978,7 @@ class DonutWidenMergeUNet:
     CATEGORY = "donut/merge"
 
     def execute(self, model_base, model_other, merge_strength, normalization_mode,
+                calibrate_threshold, normalization_scaling, enable_fast_adjustment,
                 importance_threshold, importance_boost,
                 rank_sensitivity, skip_threshold,
                 lora_stack=None, model_3=None, model_4=None, model_5=None, model_6=None,
@@ -2907,7 +2998,7 @@ class DonutWidenMergeUNet:
         # Check cache first
         all_models = [model_base, model_other, model_3, model_4, model_5, model_6,
                      model_7, model_8, model_9, model_10, model_11, model_12]
-        cache_key = compute_merge_hash(all_models, merge_strength, importance_threshold, importance_boost, rank_sensitivity, skip_threshold, f"{normalization_mode}_enhanced_widen")
+        cache_key = compute_merge_hash(all_models, merge_strength, importance_threshold, importance_boost, rank_sensitivity, skip_threshold, f"{normalization_mode}_enhanced_widen", calibrate_threshold, normalization_scaling)
 
         cached_result = check_cache_for_merge(cache_key)
         if cached_result is not None:
@@ -2980,7 +3071,9 @@ class DonutWidenMergeUNet:
                         base_merge_strength=merge_strength,
                         rank_sensitivity=rank_sensitivity,
                         skip_threshold=skip_threshold,
-                        normalization_mode=normalization_mode
+                        normalization_mode=normalization_mode,
+                        calibrate_threshold=calibrate_threshold,
+                        normalization_scaling=normalization_scaling
                     )
                     
                     # Apply merged parameters with shape validation
@@ -3063,7 +3156,9 @@ class DonutWidenMergeUNet:
                         base_merge_strength=merge_strength,
                         rank_sensitivity=0.0,  # Disable dynamic strength
                         skip_threshold=skip_threshold,
-                        normalization_mode=normalization_mode
+                        normalization_mode=normalization_mode,
+                        calibrate_threshold=calibrate_threshold,
+                        normalization_scaling=normalization_scaling
                     )
                     
                     # Apply merged parameters with shape validation
@@ -3205,6 +3300,9 @@ class DonutWidenMergeCLIP:
                 "clip_other": ("CLIP",),
                 "merge_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 3.0, "step": 0.1}),
                 "normalization_mode": (["magnitude", "calibrate", "none"], {"default": "magnitude"}),  # (renorm_mode)
+                "calibrate_threshold": ("FLOAT", {"default": 0.3, "min": 0.1, "max": 1.0, "step": 0.05}),  # t parameter for calibrate mode only
+                "normalization_scaling": ("FLOAT", {"default": 1.1, "min": 0.1, "max": 3.0, "step": 0.1}),  # scaling for both magnitude and calibrate modes
+                "enable_fast_adjustment": ("BOOLEAN", {"default": False}),  # Enable post-merge parameter adjustment
                 # Enhanced WIDEN parameters
                 "importance_threshold": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 500.0, "step": 0.1}),  # (above_average_value_ratio)
                 "importance_boost": ("FLOAT", {"default": 2.5, "min": 0.0, "max": 3.0, "step": 0.1}),  # (score_calibration_value)
@@ -3233,6 +3331,7 @@ class DonutWidenMergeCLIP:
     CATEGORY = "donut/merge"
 
     def execute(self, clip_base, clip_other, merge_strength, normalization_mode,
+                calibrate_threshold, normalization_scaling, enable_fast_adjustment,
                 importance_threshold, importance_boost,
                 rank_sensitivity, skip_threshold,
                 lora_stack=None, clip_3=None, clip_4=None, clip_5=None, clip_6=None,
@@ -3252,7 +3351,7 @@ class DonutWidenMergeCLIP:
         # Check cache first
         all_clips = [clip_base, clip_other, clip_3, clip_4, clip_5, clip_6,
                     clip_7, clip_8, clip_9, clip_10, clip_11, clip_12]
-        cache_key = compute_merge_hash(all_clips, merge_strength, importance_threshold, importance_boost, rank_sensitivity, skip_threshold, f"{normalization_mode}_enhanced_widen")
+        cache_key = compute_merge_hash(all_clips, merge_strength, importance_threshold, importance_boost, rank_sensitivity, skip_threshold, f"{normalization_mode}_enhanced_widen", calibrate_threshold, normalization_scaling)
 
         cached_result = check_cache_for_merge(cache_key)
         if cached_result is not None:
@@ -3340,7 +3439,9 @@ class DonutWidenMergeCLIP:
                         base_merge_strength=merge_strength,
                         rank_sensitivity=rank_sensitivity,
                         skip_threshold=skip_threshold,
-                        normalization_mode=normalization_mode
+                        normalization_mode=normalization_mode,
+                        calibrate_threshold=calibrate_threshold,
+                        normalization_scaling=normalization_scaling
                     )
                     
                     # Apply merged parameters with shape validation
@@ -3423,7 +3524,9 @@ class DonutWidenMergeCLIP:
                         base_merge_strength=merge_strength,
                         rank_sensitivity=0.0,  # Disable dynamic strength
                         skip_threshold=skip_threshold,
-                        normalization_mode=normalization_mode
+                        normalization_mode=normalization_mode,
+                        calibrate_threshold=calibrate_threshold,
+                        normalization_scaling=normalization_scaling
                     )
                     
                     # Apply merged parameters with shape validation
