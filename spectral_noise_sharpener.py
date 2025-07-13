@@ -213,32 +213,27 @@ class SpectralNoiseSharpener:
                 # Calculate the actual ratio between target and current energy
                 energy_ratio = target_energy / current_energy
                 
-                # Only enhance if reference has more noise (ratio > 1.0)
-                if energy_ratio > 1.1:  # At least 10% more energy needed
-                    # Apply frequency-dependent enhancement scaling based on ratio
-                    if freq_position < 0.1:
-                        # Very low frequencies (DC, large structures) - minimal change
-                        enhancement_factor = 1.0 + (energy_ratio - 1.0) * 0.1
-                    elif freq_position < 0.3:
-                        # Low-mid frequencies - gentle enhancement
-                        enhancement_factor = 1.0 + (energy_ratio - 1.0) * 0.3
-                    elif freq_position < 0.7:
-                        # Mid frequencies - moderate enhancement (textures, details)
-                        enhancement_factor = 1.0 + (energy_ratio - 1.0) * 0.6
-                    else:
-                        # High frequencies - full ratio enhancement (no scaling)
-                        enhancement_factor = energy_ratio
-                    
-                    # No caps - let the math determine the enhancement
+                # Apply frequency-dependent enhancement scaling based on ratio
+                if freq_position < 0.1:
+                    # Very low frequencies (DC, large structures) - minimal change
+                    enhancement_factor = 1.0 + (energy_ratio - 1.0) * 0.1
+                elif freq_position < 0.3:
+                    # Low-mid frequencies - gentle enhancement
+                    enhancement_factor = 1.0 + (energy_ratio - 1.0) * 0.3
+                elif freq_position < 0.7:
+                    # Mid frequencies - moderate enhancement (textures, details)
+                    enhancement_factor = 1.0 + (energy_ratio - 1.0) * 0.6
                 else:
-                    enhancement_factor = 1.0
+                    # High frequencies - full ratio enhancement (no scaling)
+                    enhancement_factor = energy_ratio
             else:
                 # Handle very small current energy - calculate based on reference
                 if target_energy > 1e-6:  # Reference has meaningful energy in this band
                     # Use full reference energy as enhancement factor (no current energy to compare)
                     enhancement_factor = 1.0 + target_energy / 1e6  # Scale appropriately
                 else:
-                    enhancement_factor = 1.0
+                    # Even with minimal energy, apply minimal enhancement based on frequency position
+                    enhancement_factor = 1.0 + 0.01 * (freq_position + 0.1)  # Small progressive enhancement
             
             enhancement_factors.append(enhancement_factor)
         
@@ -322,13 +317,8 @@ class SpectralNoiseSharpener:
         Returns:
             Enhanced image with reference-guided sharpening
         """
-        # If no strength, return original image
-        if strength <= 0.0:
-            return input_image.copy()
-        
-        # If images are identical, return original (no enhancement needed)
-        if np.allclose(input_image, reference_image, rtol=1e-5):
-            return input_image.copy()
+        # Allow all strength values including 0.0 - let the processing handle it
+        # Allow identical images - still process through enhancement pipeline
         
         from scipy import ndimage
         

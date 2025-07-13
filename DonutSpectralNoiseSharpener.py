@@ -12,15 +12,16 @@ Implements state-of-the-art spectral noise sharpening based on 2024 research:
 import torch
 import numpy as np
 import cv2
+import time
 from typing import Dict, Tuple, Any
 from PIL import Image
 
 from .spectral_noise_sharpener import SpectralNoiseSharpener
 
 
-class DonutSpectralNoiseSharpener:
+class DonutSharpenerFromReference:
     """
-    ComfyUI node for advanced spectral noise sharpening with reference guidance.
+    ComfyUI node for advanced spectral sharpening using a reference image.
     
     Based on 2024 scientific research in frequency domain image enhancement,
     this node matches the spectral noise characteristics of AI images to real photos.
@@ -34,7 +35,7 @@ class DonutSpectralNoiseSharpener:
                 "reference_image": ("IMAGE",),
             },
             "optional": {
-                "enhancement_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1}),
+                "enhancement_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.1}),
                 "frequency_bands": ("INT", {"default": 16, "min": 8, "max": 32, "step": 1}),
                 "spectral_mode": (["full_spectrum", "high_freq_only", "adaptive"], {"default": "full_spectrum"}),
                 "blend_factor": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.1}),
@@ -354,10 +355,402 @@ TECHNICAL ADVANTAGES:
             )
 
 
+class DonutSharpener:
+    """
+    ComfyUI node for spectral sharpening with generated noise reference.
+    
+    Uses the input image as base and generates various types of noise
+    to create synthetic reference characteristics for enhancement.
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "input_image": ("IMAGE",),
+            },
+            "optional": {
+                "enhancement_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.1}),
+                "frequency_bands": ("INT", {"default": 16, "min": 8, "max": 32, "step": 1}),
+                "noise_type": (["gaussian", "perlin", "film_grain", "sensor_noise", "uniform", "realistic_grain"], {"default": "gaussian"}),
+                "noise_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 1.0}),
+                "noise_scale": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+                "noise_saturation": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "spectral_mode": (["full_spectrum", "high_freq_only", "adaptive"], {"default": "full_spectrum"}),
+                "blend_factor": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.1}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("enhanced_image", "noise_reference", "enhancement_report", "spectral_analysis")
+    FUNCTION = "enhance_with_noise_reference"
+    CATEGORY = "donut/enhancement"
+
+    def __init__(self):
+        self.sharpener = None
+        self.reference_sharpener = DonutSharpenerFromReference()
+    
+    def tensor2pil(self, tensor_image):
+        """Convert tensor to PIL image."""
+        if len(tensor_image.shape) == 4:
+            tensor_image = tensor_image[0]  # Take first image from batch
+        
+        if hasattr(tensor_image, 'cpu'):
+            np_image = tensor_image.cpu().numpy()
+        else:
+            np_image = tensor_image
+        
+        np_image = (np_image * 255).astype(np.uint8)
+        return Image.fromarray(np_image)
+    
+    def pil2tensor(self, pil_image):
+        """Convert PIL image to tensor."""
+        np_image = np.array(pil_image).astype(np.float32) / 255.0
+        return torch.from_numpy(np_image).unsqueeze(0)
+    
+    def image_add_grain(self, image, grain_scale, grain_power, grain_sat, toe=0, seed=None):
+        """
+        Add realistic film grain to an image.
+        
+        Args:
+            image: PIL Image
+            grain_scale: Size/scale of grain (0.1-10.0)
+            grain_power: Intensity of grain (0.0-1.0) 
+            grain_sat: Saturation effect (0.0-1.0)
+            toe: Curve adjustment (not used, kept for compatibility)
+            seed: Random seed for reproducibility
+        """
+        if seed is not None:
+            np.random.seed(seed)
+        
+        # Convert to numpy array
+        img_array = np.array(image).astype(np.float32) / 255.0
+        height, width, channels = img_array.shape
+        
+        # Create grain texture based on scale
+        if grain_scale >= 1.0:
+            # For larger scales, create smoother grain
+            grain_size = int(max(height, width) / (grain_scale * 100))
+            grain_size = max(grain_size, 1)
+            
+            # Generate base grain texture
+            small_grain = np.random.normal(0, 1, (height//grain_size + 1, width//grain_size + 1))
+            
+            # Resize grain to match image size
+            from PIL import Image as PILImage
+            grain_pil = PILImage.fromarray(((small_grain + 1) * 127.5).astype(np.uint8), mode='L')
+            grain_pil = grain_pil.resize((width, height), PILImage.BILINEAR)
+            grain = np.array(grain_pil).astype(np.float32) / 127.5 - 1.0
+        else:
+            # For smaller scales, use direct noise
+            grain = np.random.normal(0, 1, (height, width))
+            # Apply some smoothing based on scale
+            if grain_scale < 0.5:
+                from scipy import ndimage
+                sigma = (1.0 - grain_scale) * 2.0
+                grain = ndimage.gaussian_filter(grain, sigma)
+        
+        # Calculate luminance for grain modulation
+        luminance = 0.299 * img_array[:,:,0] + 0.587 * img_array[:,:,1] + 0.114 * img_array[:,:,2]
+        
+        # Modulate grain by luminance (film grain is more visible in mid-tones)
+        grain_modulation = 1.0 - np.abs(luminance - 0.5) * 2.0  # Peak at 0.5 luminance
+        grain_modulation = np.power(grain_modulation, 0.5)  # Soften the curve
+        
+        # Apply grain power
+        grain = grain * grain_power * 0.1  # Scale down for realistic effect
+        grain = grain * grain_modulation[:,:,np.newaxis]  # Apply luminance modulation
+        
+        # Create color grain based on saturation parameter
+        if grain_sat > 0 and channels >= 3:
+            # Color grain - different noise for each channel
+            color_grain = np.zeros_like(img_array)
+            for c in range(min(3, channels)):
+                # Generate slightly different grain for each color channel
+                channel_seed = (seed + c) if seed is not None else None
+                if channel_seed is not None:
+                    np.random.seed(channel_seed)
+                
+                if grain_scale >= 1.0:
+                    small_grain = np.random.normal(0, 1, (height//grain_size + 1, width//grain_size + 1))
+                    grain_pil = PILImage.fromarray(((small_grain + 1) * 127.5).astype(np.uint8), mode='L')
+                    grain_pil = grain_pil.resize((width, height), PILImage.BILINEAR)
+                    channel_grain = np.array(grain_pil).astype(np.float32) / 127.5 - 1.0
+                else:
+                    channel_grain = np.random.normal(0, 1, (height, width))
+                    if grain_scale < 0.5:
+                        channel_grain = ndimage.gaussian_filter(channel_grain, sigma)
+                
+                color_grain[:,:,c] = channel_grain * grain_power * 0.05 * grain_sat * grain_modulation
+            
+            # Blend monochrome and color grain
+            final_grain = grain * (1.0 - grain_sat) + color_grain * grain_sat
+        else:
+            # Monochrome grain only
+            final_grain = np.repeat(grain[:,:,np.newaxis], channels, axis=2)
+        
+        # Apply grain to image
+        result = img_array + final_grain
+        result = np.clip(result, 0.0, 1.0)
+        
+        # Convert back to PIL
+        result_uint8 = (result * 255).astype(np.uint8)
+        return Image.fromarray(result_uint8)
+
+    def generate_noise_reference(self, input_image, noise_type: str, noise_strength: float, 
+                                noise_scale: float = 1.0, noise_saturation: float = 1.0):
+        """Generate a noise reference image based on the input image."""
+        import numpy as np
+        
+        if noise_type == "realistic_grain":
+            # Use our custom grain function
+            pil_image = self.tensor2pil(input_image)
+            grain_image = self.image_add_grain(pil_image, noise_scale, noise_strength, noise_saturation, 
+                                             toe=0, seed=int(time.time()))
+            return self.pil2tensor(grain_image)
+        
+        else:
+            # Use existing noise generation methods
+            input_cv2 = self.reference_sharpener.tensor_to_cv2(input_image)
+            height, width = input_cv2.shape[:2]
+            
+            # Start with the input image
+            noisy_image = input_cv2.astype(np.float32)
+            
+            if noise_type == "gaussian":
+                # Gaussian noise with scale control
+                base_noise = np.random.normal(0, noise_strength * 50, (height, width, 3))
+                
+                # Apply scale: larger scale = smoother/larger noise patterns
+                if noise_scale != 1.0:
+                    # Create multi-scale Gaussian noise
+                    scale_factor = int(max(1, noise_scale))
+                    small_height, small_width = height // scale_factor, width // scale_factor
+                    small_noise = np.random.normal(0, noise_strength * 50, (small_height, small_width, 3))
+                    # Resize to full size for smoother patterns
+                    from scipy import ndimage
+                    noise = ndimage.zoom(small_noise, (scale_factor, scale_factor, 1), order=1)[:height, :width, :]
+                    # Blend with base noise based on scale
+                    blend_factor = min(1.0, noise_scale / 3.0)
+                    noise = base_noise * (1 - blend_factor) + noise * blend_factor
+                else:
+                    noise = base_noise
+                
+                # Apply saturation: controls color vs monochrome noise
+                if noise_saturation < 1.0:
+                    # Convert to monochrome and blend
+                    mono_noise = np.mean(noise, axis=2, keepdims=True)
+                    mono_noise = np.repeat(mono_noise, 3, axis=2)
+                    noise = noise * noise_saturation + mono_noise * (1.0 - noise_saturation)
+                
+            elif noise_type == "perlin":
+                # Perlin-like noise with scale and saturation
+                base_scales = [2, 4, 8]
+                # Adjust base scales by noise_scale parameter
+                scales = [max(1, int(s * noise_scale)) for s in base_scales]
+                
+                noise = np.zeros((height, width, 3))
+                for i, scale in enumerate(scales):
+                    weight = noise_strength * (20 / scale) * (1.0 + i * 0.3)  # Progressive weighting
+                    small_noise = np.random.normal(0, weight, (height//scale + 1, width//scale + 1, 3))
+                    small_noise = np.repeat(np.repeat(small_noise, scale, axis=0), scale, axis=1)[:height, :width, :]
+                    noise += small_noise
+                
+                # Apply saturation
+                if noise_saturation < 1.0:
+                    mono_noise = np.mean(noise, axis=2, keepdims=True)
+                    mono_noise = np.repeat(mono_noise, 3, axis=2)
+                    noise = noise * noise_saturation + mono_noise * (1.0 - noise_saturation)
+                    
+            elif noise_type == "film_grain":
+                # Film grain with scale and saturation controls
+                scale_factor = max(1, int(noise_scale))
+                grain_height, grain_width = height // scale_factor, width // scale_factor
+                
+                # Generate luminance-based grain at scaled resolution
+                grain_luminance = np.random.normal(0, noise_strength * 20, (grain_height, grain_width))
+                
+                # Resize grain if needed
+                if scale_factor > 1:
+                    from scipy import ndimage
+                    grain_luminance = ndimage.zoom(grain_luminance, scale_factor, order=1)[:height, :width]
+                
+                # Apply grain with color correlation
+                noise = np.zeros((height, width, 3))
+                noise[:,:,0] = grain_luminance * 1.0  # Red
+                noise[:,:,1] = grain_luminance * 0.8  # Green (less noise)
+                noise[:,:,2] = grain_luminance * 1.1  # Blue (slight more)
+                
+                # Add independent color noise scaled by saturation
+                color_noise = np.random.normal(0, noise_strength * 8 * noise_saturation, (height, width, 3))
+                noise += color_noise
+                
+            elif noise_type == "sensor_noise":
+                # Digital sensor noise with scale affecting hot pixel clustering
+                noise = np.random.normal(0, noise_strength * 35, (height, width, 3))
+                
+                # Hot pixels - scale affects clustering
+                hot_pixel_density = 0.0001 * noise_strength * noise_scale
+                hot_pixels = np.random.random((height, width, 3)) < hot_pixel_density
+                noise[hot_pixels] += np.random.uniform(50, 100, np.sum(hot_pixels))
+                
+                # Saturation affects color correlation of sensor noise
+                if noise_saturation < 1.0:
+                    mono_noise = np.mean(noise, axis=2, keepdims=True)
+                    mono_noise = np.repeat(mono_noise, 3, axis=2)
+                    noise = noise * noise_saturation + mono_noise * (1.0 - noise_saturation)
+                
+            elif noise_type == "uniform":
+                # Uniform noise with scale and saturation
+                base_noise = np.random.uniform(-noise_strength * 40, noise_strength * 40, (height, width, 3))
+                
+                # Scale affects smoothness of uniform noise
+                if noise_scale > 1.0:
+                    from scipy import ndimage
+                    sigma = (noise_scale - 1.0) * 0.5
+                    noise = ndimage.gaussian_filter(base_noise, sigma=(sigma, sigma, 0))
+                else:
+                    noise = base_noise
+                
+                # Saturation affects color correlation
+                if noise_saturation < 1.0:
+                    mono_noise = np.mean(noise, axis=2, keepdims=True)
+                    mono_noise = np.repeat(mono_noise, 3, axis=2)
+                    noise = noise * noise_saturation + mono_noise * (1.0 - noise_saturation)
+            
+            # Add noise to image
+            noisy_image += noise
+            noisy_image = np.clip(noisy_image, 0, 255).astype(np.uint8)
+            
+            # Convert back to tensor
+            return self.reference_sharpener.cv2_to_tensor(noisy_image)
+    
+    def enhance_with_noise_reference(self, input_image, enhancement_strength=1.0, frequency_bands=16, 
+                                   noise_type="gaussian", noise_strength=0.0, noise_scale=1.0, 
+                                   noise_saturation=1.0, spectral_mode="full_spectrum", blend_factor=0.8):
+        """
+        Main enhancement function using generated noise reference.
+        """
+        try:
+            # Convert percentage to decimal (0-100% -> 0.0-1.0)
+            noise_strength_scaled = noise_strength / 100.0
+            
+            if noise_strength == 0.0:
+                # Self-amplification mode - generate enhancement factors directly
+                # Convert ComfyUI tensor to OpenCV format
+                input_cv2 = self.reference_sharpener.tensor_to_cv2(input_image)
+                
+                # Initialize sharpener with specified parameters
+                if self.sharpener is None or self.sharpener.num_bands != frequency_bands:
+                    self.sharpener = SpectralNoiseSharpener(num_bands=frequency_bands)
+                
+                # Convert to grayscale for spectral analysis
+                if len(input_cv2.shape) == 3:
+                    input_gray = cv2.cvtColor(input_cv2, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+                else:
+                    input_gray = input_cv2.astype(np.float32) / 255.0
+                
+                # Create band filters for this image size
+                self.sharpener.band_filters = None
+                self.sharpener.create_reversible_frequency_bands(input_gray.shape)
+                
+                # Generate progressive enhancement factors for self-amplification
+                enhancement_factors = []
+                for i in range(frequency_bands):
+                    freq_position = i / (frequency_bands - 1)  # 0 to 1
+                    
+                    # Progressive enhancement: more for higher frequencies
+                    if freq_position < 0.2:
+                        # Low frequencies: minimal enhancement
+                        base_factor = 1.0 + 0.1 * enhancement_strength
+                    elif freq_position < 0.5:
+                        # Mid frequencies: moderate enhancement 
+                        base_factor = 1.0 + 0.3 * enhancement_strength
+                    else:
+                        # High frequencies: strong enhancement (where noise lives)
+                        base_factor = 1.0 + 0.6 * enhancement_strength
+                    
+                    enhancement_factors.append(base_factor)
+                
+                # Apply spectral enhancement
+                enhanced_gray = self.sharpener.apply_spectral_noise_sharpening(
+                    input_gray, enhancement_factors, 1.0  # Use full strength since factors are pre-scaled
+                )
+                
+                # Apply to color channels if input is color
+                if len(input_cv2.shape) == 3:
+                    input_float = input_cv2.astype(np.float32) / 255.0
+                    enhanced_image = np.zeros_like(input_float)
+                    
+                    # Calculate enhancement ratio for each pixel
+                    ratio = enhanced_gray / (input_gray + 1e-8)
+                    ratio = np.clip(ratio, 0.5, 2.0)
+                    
+                    # Apply ratio to each color channel
+                    for channel in range(3):
+                        enhanced_image[:, :, channel] = input_float[:, :, channel] * ratio
+                    
+                    enhanced_cv2 = np.clip(enhanced_image * 255, 0, 255).astype(np.uint8)
+                else:
+                    enhanced_cv2 = np.clip(enhanced_gray * 255, 0, 255).astype(np.uint8)
+                
+                # Apply blending if specified
+                if blend_factor > 0.0:
+                    input_float = input_cv2.astype(np.float32) / 255.0
+                    enhanced_float = enhanced_cv2.astype(np.float32) / 255.0
+                    blended_float = self.reference_sharpener.blend_images(input_float, enhanced_float, blend_factor)
+                    enhanced_cv2 = np.clip(blended_float * 255, 0, 255).astype(np.uint8)
+                
+                # Convert back to ComfyUI tensor format
+                enhanced_tensor = self.reference_sharpener.cv2_to_tensor(enhanced_cv2)
+                
+                # Generate reports
+                enhancement_info = {
+                    'enhancement_factors': enhancement_factors,
+                    'strength': enhancement_strength,
+                    'num_bands': frequency_bands,
+                    'method': 'self_amplification',
+                    'reference_spectrum': {
+                        'band_energies': [1.0] * frequency_bands,  # Placeholder for reporting
+                        'band_phase_stats': [0.0] * frequency_bands
+                    }
+                }
+                
+                enhancement_report = self.reference_sharpener.format_enhancement_report(enhancement_info)
+                spectral_analysis = self.reference_sharpener.format_spectral_analysis(enhancement_info)
+                
+                return (enhanced_tensor, input_image, enhancement_report, spectral_analysis)
+                
+            else:
+                # Normal noise reference mode
+                # Generate noise reference image
+                noise_reference = self.generate_noise_reference(input_image, noise_type, noise_strength_scaled, 
+                                                               noise_scale, noise_saturation)
+                
+                # Use the reference-based sharpener with our generated reference
+                enhanced_image, enhancement_report, spectral_analysis = self.reference_sharpener.enhance_spectral_noise(
+                    input_image, noise_reference, enhancement_strength, frequency_bands, 
+                    spectral_mode, blend_factor
+                )
+                
+                return (enhanced_image, noise_reference, enhancement_report, spectral_analysis)
+            
+        except Exception as e:
+            error_msg = f"Enhancement with noise reference failed: {str(e)}"
+            return (
+                input_image,
+                input_image,
+                f"ERROR: {error_msg}",
+                f"Analysis failed: {error_msg}"
+            )
+
+
 NODE_CLASS_MAPPINGS = {
-    "Donut Spectral Noise Sharpener": DonutSpectralNoiseSharpener,
+    "Donut Sharpener (from reference)": DonutSharpenerFromReference,
+    "Donut Sharpener": DonutSharpener,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Donut Spectral Noise Sharpener": "Donut Spectral Noise Sharpener",
+    "Donut Sharpener (from reference)": "Donut Sharpener (from reference)",
+    "Donut Sharpener": "Donut Sharpener",
 }
