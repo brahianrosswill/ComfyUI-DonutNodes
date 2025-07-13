@@ -140,14 +140,16 @@ class SpectralNoiseSharpener:
         if self.band_filters is None:
             self.create_reversible_frequency_bands(reference_image.shape)
         
-        # Extract spectral energy distribution per band
+        # Extract spectral noise characteristics per band (not normalized by total energy)
         band_energies = []
-        total_energy = np.sum(ref_amplitude**2)
         
         for band_filter in self.band_filters:
+            # Calculate absolute energy in this frequency band
             band_energy = np.sum((ref_amplitude * band_filter)**2)
-            normalized_energy = band_energy / (total_energy + 1e-10)
-            band_energies.append(normalized_energy)
+            # Normalize by band area to get energy density (noise level per frequency)
+            band_area = np.sum(band_filter**2)
+            noise_density = band_energy / (band_area + 1e-10)
+            band_energies.append(noise_density)
         
         # Extract phase characteristics per band
         band_phase_stats = []
@@ -183,19 +185,21 @@ class SpectralNoiseSharpener:
         # Analyze input image spectrum
         input_amplitude, input_phase = self.amplitude_phase_decomposition(input_image)
         
-        # Extract input spectral energy distribution
+        # Extract input spectral noise characteristics (same method as reference)
         input_band_energies = []
-        total_energy = np.sum(input_amplitude**2)
         
         for band_filter in self.band_filters:
+            # Calculate absolute energy in this frequency band
             band_energy = np.sum((input_amplitude * band_filter)**2)
-            normalized_energy = band_energy / (total_energy + 1e-10)
-            input_band_energies.append(normalized_energy)
+            # Normalize by band area to get noise density per frequency
+            band_area = np.sum(band_filter**2)
+            noise_density = band_energy / (band_area + 1e-10)
+            input_band_energies.append(noise_density)
         
         input_band_energies = np.array(input_band_energies)
         ref_band_energies = self.reference_spectrum['band_energies']
         
-        # Calculate enhancement factors focused on mid-frequency ranges where changes are visible
+        # Calculate enhancement factors based on reference spectrum comparison
         enhancement_factors = []
         for i in range(self.num_bands):
             target_energy = ref_band_energies[i]
@@ -204,34 +208,37 @@ class SpectralNoiseSharpener:
             # Calculate enhancement based on frequency band position
             freq_position = i / (self.num_bands - 1)  # 0 to 1
             
-            # Focus enhancement on mid-to-high frequencies where effects are visible
-            if freq_position < 0.1:
-                # Very low frequencies (DC, large structures) - minimal change
-                enhancement_factor = 1.0
-            elif freq_position < 0.3:
-                # Low-mid frequencies - gentle enhancement
-                if current_energy > 1e-8 and target_energy > current_energy:
-                    ratio = target_energy / current_energy
-                    enhancement_factor = 1.0 + (ratio - 1.0) * 0.5
-                    enhancement_factor = min(enhancement_factor, 2.0)
+            # Always use reference spectrum for comparison
+            if current_energy > 1e-10:
+                # Calculate the actual ratio between target and current energy
+                energy_ratio = target_energy / current_energy
+                
+                # Only enhance if reference has more noise (ratio > 1.0)
+                if energy_ratio > 1.1:  # At least 10% more energy needed
+                    # Apply frequency-dependent enhancement scaling based on ratio
+                    if freq_position < 0.1:
+                        # Very low frequencies (DC, large structures) - minimal change
+                        enhancement_factor = 1.0 + (energy_ratio - 1.0) * 0.1
+                    elif freq_position < 0.3:
+                        # Low-mid frequencies - gentle enhancement
+                        enhancement_factor = 1.0 + (energy_ratio - 1.0) * 0.3
+                    elif freq_position < 0.7:
+                        # Mid frequencies - moderate enhancement (textures, details)
+                        enhancement_factor = 1.0 + (energy_ratio - 1.0) * 0.6
+                    else:
+                        # High frequencies - full ratio enhancement (no scaling)
+                        enhancement_factor = energy_ratio
+                    
+                    # No caps - let the math determine the enhancement
                 else:
-                    enhancement_factor = 1.2
-            elif freq_position < 0.7:
-                # Mid frequencies - moderate enhancement (textures, details)
-                if current_energy > 1e-8 and target_energy > current_energy:
-                    ratio = target_energy / current_energy
-                    enhancement_factor = 1.0 + (ratio - 1.0) * 0.8
-                    enhancement_factor = min(enhancement_factor, 3.0)
-                else:
-                    enhancement_factor = 1.5 + freq_position
+                    enhancement_factor = 1.0
             else:
-                # High frequencies - aggressive enhancement (noise, fine details)
-                if current_energy > 1e-8 and target_energy > current_energy:
-                    ratio = target_energy / current_energy
-                    enhancement_factor = 1.0 + (ratio - 1.0) * 1.2
-                    enhancement_factor = min(enhancement_factor, 4.0)
+                # Handle very small current energy - calculate based on reference
+                if target_energy > 1e-6:  # Reference has meaningful energy in this band
+                    # Use full reference energy as enhancement factor (no current energy to compare)
+                    enhancement_factor = 1.0 + target_energy / 1e6  # Scale appropriately
                 else:
-                    enhancement_factor = 2.0 + freq_position * 2.0  # 2.0 to 4.0
+                    enhancement_factor = 1.0
             
             enhancement_factors.append(enhancement_factor)
         
@@ -263,14 +270,14 @@ class SpectralNoiseSharpener:
         if self.band_filters is None:
             self.create_reversible_frequency_bands(image.shape)
         
-        # Apply band-wise enhancement to amplitude only (preserve brightness)
+        # Apply band-wise enhancement by amplifying existing frequencies
         enhanced_amplitude = np.zeros_like(amplitude)
         
         for i, (band_filter, enhancement_factor) in enumerate(zip(self.band_filters, enhancement_factors)):
             # Extract amplitude in this frequency band
             band_amplitude = amplitude * band_filter
             
-            # Apply enhancement with strength control
+            # Apply enhancement with strength control - amplify existing content
             actual_enhancement = 1.0 + (enhancement_factor - 1.0) * strength
             enhanced_band = band_amplitude * actual_enhancement
             
@@ -315,6 +322,14 @@ class SpectralNoiseSharpener:
         Returns:
             Enhanced image with reference-guided sharpening
         """
+        # If no strength, return original image
+        if strength <= 0.0:
+            return input_image.copy()
+        
+        # If images are identical, return original (no enhancement needed)
+        if np.allclose(input_image, reference_image, rtol=1e-5):
+            return input_image.copy()
+        
         from scipy import ndimage
         
         # Calculate reference image characteristics
@@ -388,20 +403,30 @@ class SpectralNoiseSharpener:
         # Calculate enhancement factors
         enhancement_factors = self.calculate_spectral_enhancement_factors(input_gray)
         
-        # Hybrid approach: combine spectral enhancement with traditional sharpening
+        # Check if strong spectral enhancement is needed (high enhancement factors)
+        max_enhancement = max(enhancement_factors)
+        if max_enhancement > 2.5:
+            # Strong enhancement needed - prioritize spectral processing
+            spectral_enhanced = self.apply_spectral_noise_sharpening(
+                input_gray, enhancement_factors, strength
+            )
+            # Minimal unsharp masking to avoid diluting the effect
+            unsharp_enhanced = self.apply_reference_guided_unsharp_mask(
+                input_gray, ref_gray, strength * 0.2
+            )
+            # Weighted blend favoring spectral
+            enhanced_gray = input_gray + (spectral_enhanced - input_gray) * 0.8 + (unsharp_enhanced - input_gray) * 0.2
+        else:
+            # Mild enhancement - use hybrid approach
+            spectral_enhanced = self.apply_spectral_noise_sharpening(
+                input_gray, enhancement_factors, strength * 0.6
+            )
+            unsharp_enhanced = self.apply_reference_guided_unsharp_mask(
+                input_gray, ref_gray, strength * 0.4
+            )
+            # Balanced blend
+            enhanced_gray = input_gray + (spectral_enhanced - input_gray) + (unsharp_enhanced - input_gray)
         
-        # 1. Apply spectral noise sharpening (60% of effect)
-        spectral_enhanced = self.apply_spectral_noise_sharpening(
-            input_gray, enhancement_factors, strength * 0.6
-        )
-        
-        # 2. Apply reference-guided unsharp mask (40% of effect)
-        unsharp_enhanced = self.apply_reference_guided_unsharp_mask(
-            input_gray, ref_gray, strength * 0.4
-        )
-        
-        # 3. Blend the two approaches
-        enhanced_gray = input_gray + (spectral_enhanced - input_gray) + (unsharp_enhanced - input_gray)
         enhanced_gray = np.clip(enhanced_gray, 0.0, 1.0)
         
         # Apply enhancement to color channels if input is color
