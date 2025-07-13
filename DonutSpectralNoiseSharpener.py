@@ -36,8 +36,8 @@ class DonutSpectralNoiseSharpener:
             "optional": {
                 "enhancement_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.1}),
                 "frequency_bands": ("INT", {"default": 16, "min": 8, "max": 32, "step": 1}),
-                "preserve_brightness": ("BOOLEAN", {"default": True}),
                 "spectral_mode": (["full_spectrum", "high_freq_only", "adaptive"], {"default": "full_spectrum"}),
+                "blend_factor": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.1}),
             }
         }
 
@@ -89,6 +89,39 @@ class DonutSpectralNoiseSharpener:
         tensor_image = torch.from_numpy(float_image).unsqueeze(0)
         
         return tensor_image
+    
+    def blend_images(self, original_image: np.ndarray, enhanced_image: np.ndarray, 
+                    blend_factor: float) -> np.ndarray:
+        """
+        Blend enhanced image with original using darken mode to reduce bright edges.
+        
+        Args:
+            original_image: Original input image
+            enhanced_image: Enhanced result image
+            blend_factor: Blend strength (0.0 = original only, 1.0 = full darken effect)
+            
+        Returns:
+            Blended image using darken blend mode
+        """
+        # Ensure both images are float32 in [0,1] range
+        original = original_image.astype(np.float32)
+        enhanced = enhanced_image.astype(np.float32)
+        
+        # Ensure values are in [0,1] range
+        original = np.clip(original, 0.0, 1.0)
+        enhanced = np.clip(enhanced, 0.0, 1.0)
+        
+        # Darken blend: where enhanced is brighter, use original to darken it
+        # This prevents bright edges and artifacts
+        darkened = np.minimum(original, enhanced)
+        
+        # Blend: 0.0 = enhanced only, 1.0 = darkened only
+        blended = enhanced * (1.0 - blend_factor) + darkened * blend_factor
+        
+        # Ensure result is in valid range
+        blended = np.clip(blended, 0.0, 1.0)
+        
+        return blended
     
     def format_enhancement_report(self, enhancement_info: Dict) -> str:
         """Format comprehensive enhancement report."""
@@ -229,7 +262,8 @@ TECHNICAL ADVANTAGES:
         return analysis
 
     def enhance_spectral_noise(self, input_image, reference_image, enhancement_strength=1.0, 
-                             frequency_bands=16, preserve_brightness=True, spectral_mode="full_spectrum"):
+                             frequency_bands=16, spectral_mode="full_spectrum",
+                             blend_factor=0.8):
         """
         Main enhancement function implementing scientific spectral noise sharpening.
         
@@ -238,8 +272,8 @@ TECHNICAL ADVANTAGES:
             reference_image: Reference image tensor from ComfyUI
             enhancement_strength: Enhancement strength (0.0 to 2.0)
             frequency_bands: Number of frequency bands for analysis
-            preserve_brightness: Whether to preserve original brightness
             spectral_mode: Spectral processing mode
+            blend_factor: Blend strength (0.0 = enhanced only, 1.0 = darkened)
             
         Returns:
             Tuple of (enhanced_image, enhancement_report, spectral_analysis)
@@ -289,14 +323,17 @@ TECHNICAL ADVANTAGES:
                     input_cv2, reference_cv2, strength=adaptive_strength
                 )
             
-            # Handle brightness preservation
-            if preserve_brightness:
-                # Additional brightness matching for color consistency
-                input_gray = cv2.cvtColor(input_cv2, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                enhanced_gray = cv2.cvtColor(enhanced_cv2, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            # Apply blending to control enhancement intensity and reduce edge artifacts
+            if blend_factor > 0.0:
+                # Convert to float [0,1] for blending
+                input_float = input_cv2.astype(np.float32) / 255.0
+                enhanced_float = enhanced_cv2.astype(np.float32) / 255.0
                 
-                brightness_ratio = np.mean(input_gray) / (np.mean(enhanced_gray) + 1e-10)
-                enhanced_cv2 = np.clip(enhanced_cv2.astype(np.float32) * brightness_ratio, 0, 255).astype(np.uint8)
+                # Blend enhanced result with original input
+                blended_float = self.blend_images(input_float, enhanced_float, blend_factor)
+                
+                # Convert back to uint8
+                enhanced_cv2 = np.clip(blended_float * 255, 0, 255).astype(np.uint8)
             
             # Convert back to ComfyUI tensor format
             enhanced_tensor = self.cv2_to_tensor(enhanced_cv2)
