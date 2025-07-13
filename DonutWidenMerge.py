@@ -2861,7 +2861,7 @@ class DonutWidenMergeUNet:
                 "merge_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 3.0, "step": 0.1}),
                 "normalization_mode": (["magnitude", "calibrate", "none"], {"default": "magnitude"}),  # (renorm_mode)
                 # Enhanced WIDEN parameters
-                "importance_threshold": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 500.0, "step": 0.1}),  # (above_average_value_ratio)
+                "importance_threshold": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 500.0, "step": 0.1}),  # (above_average_value_ratio)
                 "importance_boost": ("FLOAT", {"default": 2.5, "min": 0.0, "max": 3.0, "step": 0.1}),  # (score_calibration_value)
                 # Dynamic compatibility settings  
                 "rank_sensitivity": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 10.0, "step": 0.1}),  # (compatibility_sensitivity)
@@ -3206,7 +3206,7 @@ class DonutWidenMergeCLIP:
                 "merge_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 3.0, "step": 0.1}),
                 "normalization_mode": (["magnitude", "calibrate", "none"], {"default": "magnitude"}),  # (renorm_mode)
                 # Enhanced WIDEN parameters
-                "importance_threshold": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 500.0, "step": 0.1}),  # (above_average_value_ratio)
+                "importance_threshold": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 500.0, "step": 0.1}),  # (above_average_value_ratio)
                 "importance_boost": ("FLOAT", {"default": 2.5, "min": 0.0, "max": 3.0, "step": 0.1}),  # (score_calibration_value)
                 # Dynamic compatibility settings  
                 "rank_sensitivity": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 10.0, "step": 0.1}),  # (compatibility_sensitivity)
