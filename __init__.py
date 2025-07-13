@@ -23,6 +23,18 @@ from .hot_reload            import NODE_DISPLAY_NAME_MAPPINGS as d_reload
 from .DonutSDXLTeaCache     import NODE_CLASS_MAPPINGS        as m_teacache
 from .DonutSDXLTeaCache     import NODE_DISPLAY_NAME_MAPPINGS as d_teacache
 
+# Block Calibration
+from .DonutBlockCalibration import NODE_CLASS_MAPPINGS        as m_calibration
+from .DonutBlockCalibration import NODE_DISPLAY_NAME_MAPPINGS as d_calibration
+
+# Frequency Analysis
+from .DonutFrequencyAnalysis import NODE_CLASS_MAPPINGS       as m_freq_analysis
+from .DonutFrequencyAnalysis import NODE_DISPLAY_NAME_MAPPINGS as d_freq_analysis
+
+# Spectral Noise Sharpening (2024 Research-Based)
+from .DonutSpectralNoiseSharpener import NODE_CLASS_MAPPINGS      as m_spectral_sharpener
+from .DonutSpectralNoiseSharpener import NODE_DISPLAY_NAME_MAPPINGS as d_spectral_sharpener
+
 # build globals
 NODE_CLASS_MAPPINGS = {
     **m1, **m2, **m3, **m4, **m5,
@@ -31,6 +43,9 @@ NODE_CLASS_MAPPINGS = {
     **m_reload,
     # **m_optuna,  # disabled - file not in repo
     **m_teacache,
+    **m_calibration,
+    **m_freq_analysis,
+    **m_spectral_sharpener,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -38,4 +53,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **d_reload,
     # **d_optuna,  # disabled - file not in repo
     **d_teacache,
+    **d_calibration,
+    **d_freq_analysis,
+    **d_spectral_sharpener,
 }
