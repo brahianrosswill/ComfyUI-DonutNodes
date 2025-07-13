@@ -35,6 +35,10 @@ from .DonutFrequencyAnalysis import NODE_DISPLAY_NAME_MAPPINGS as d_freq_analysi
 from .DonutSpectralNoiseSharpener import NODE_CLASS_MAPPINGS      as m_spectral_sharpener
 from .DonutSpectralNoiseSharpener import NODE_DISPLAY_NAME_MAPPINGS as d_spectral_sharpener
 
+# DonutSampler - CFG Linear Progression
+from .DonutKSamplerCFGLinear import NODE_CLASS_MAPPINGS        as m_donut_sampler
+from .DonutKSamplerCFGLinear import NODE_DISPLAY_NAME_MAPPINGS as d_donut_sampler
+
 # build globals
 NODE_CLASS_MAPPINGS = {
     **m1, **m2, **m3, **m4, **m5,
@@ -46,6 +50,7 @@ NODE_CLASS_MAPPINGS = {
     **m_calibration,
     **m_freq_analysis,
     **m_spectral_sharpener,
+    **m_donut_sampler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -56,4 +61,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **d_calibration,
     **d_freq_analysis,
     **d_spectral_sharpener,
+    **d_donut_sampler,
 }

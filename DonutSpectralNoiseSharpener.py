@@ -420,6 +420,10 @@ class DonutSharpener:
             toe: Curve adjustment (not used, kept for compatibility)
             seed: Random seed for reproducibility
         """
+        # Import dependencies at function start
+        from scipy import ndimage
+        from PIL import Image as PILImage
+        
         if seed is not None:
             np.random.seed(seed)
         
@@ -428,16 +432,17 @@ class DonutSharpener:
         height, width, channels = img_array.shape
         
         # Create grain texture based on scale
+        # Calculate grain size and sigma once for use in both main and color grain
+        grain_size = int(max(height, width) / (grain_scale * 100)) if grain_scale >= 1.0 else 1
+        grain_size = max(grain_size, 1)
+        sigma = (1.0 - grain_scale) * 2.0 if grain_scale < 0.5 else 0.0
+        
         if grain_scale >= 1.0:
             # For larger scales, create smoother grain
-            grain_size = int(max(height, width) / (grain_scale * 100))
-            grain_size = max(grain_size, 1)
-            
             # Generate base grain texture
             small_grain = np.random.normal(0, 1, (height//grain_size + 1, width//grain_size + 1))
             
             # Resize grain to match image size
-            from PIL import Image as PILImage
             grain_pil = PILImage.fromarray(((small_grain + 1) * 127.5).astype(np.uint8), mode='L')
             grain_pil = grain_pil.resize((width, height), PILImage.BILINEAR)
             grain = np.array(grain_pil).astype(np.float32) / 127.5 - 1.0
@@ -446,8 +451,6 @@ class DonutSharpener:
             grain = np.random.normal(0, 1, (height, width))
             # Apply some smoothing based on scale
             if grain_scale < 0.5:
-                from scipy import ndimage
-                sigma = (1.0 - grain_scale) * 2.0
                 grain = ndimage.gaussian_filter(grain, sigma)
         
         # Calculate luminance for grain modulation
@@ -503,7 +506,7 @@ class DonutSharpener:
         import numpy as np
         
         if noise_type == "realistic_grain":
-            # Use our custom grain function
+            # Use our custom grain function - noise_strength is already scaled (0.0-1.0)
             pil_image = self.tensor2pil(input_image)
             grain_image = self.image_add_grain(pil_image, noise_scale, noise_strength, noise_saturation, 
                                              toe=0, seed=int(time.time()))
