@@ -2951,7 +2951,7 @@ class DonutWidenMergeUNet:
                 "normalization_scaling": ("FLOAT", {"default": 1.1, "min": 0.1, "max": 3.0, "step": 0.1}),  # scaling for both magnitude and calibrate modes
                 "enable_fast_adjustment": ("BOOLEAN", {"default": False}),  # Enable post-merge parameter adjustment
                 # Enhanced WIDEN parameters
-                "importance_threshold": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 500.0, "step": 0.1}),  # (above_average_value_ratio)
+                "importance_threshold": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 500.0, "step": 0.1}),  # (above_average_value_ratio)
                 "importance_boost": ("FLOAT", {"default": 2.5, "min": 0.0, "max": 3.0, "step": 0.1}),  # (score_calibration_value)
                 # Dynamic compatibility settings  
                 "rank_sensitivity": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 10.0, "step": 0.1}),  # (compatibility_sensitivity)
@@ -3304,7 +3304,7 @@ class DonutWidenMergeCLIP:
                 "normalization_scaling": ("FLOAT", {"default": 1.1, "min": 0.1, "max": 3.0, "step": 0.1}),  # scaling for both magnitude and calibrate modes
                 "enable_fast_adjustment": ("BOOLEAN", {"default": False}),  # Enable post-merge parameter adjustment
                 # Enhanced WIDEN parameters
-                "importance_threshold": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 500.0, "step": 0.1}),  # (above_average_value_ratio)
+                "importance_threshold": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 500.0, "step": 0.1}),  # (above_average_value_ratio)
                 "importance_boost": ("FLOAT", {"default": 2.5, "min": 0.0, "max": 3.0, "step": 0.1}),  # (score_calibration_value)
                 # Dynamic compatibility settings  
                 "rank_sensitivity": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 10.0, "step": 0.1}),  # (compatibility_sensitivity)
