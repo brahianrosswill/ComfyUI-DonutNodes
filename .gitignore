@@ -1,0 +1,7 @@
+__pycache__/
+
+# User config (contains API keys)
+config.yaml
+
+# CivitAI cache
+civitai_cache/

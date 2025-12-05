@@ -1,0 +1,21 @@
+# DonutNodes Configuration
+# Copy this file to config.yaml and fill in your settings
+# Or use the ComfyUI Settings panel (gear icon) to configure
+
+civitai:
+  # Your CivitAI API key (optional but recommended for higher rate limits)
+  # Get one from: https://civitai.com/user/account -> API Keys
+  api_key: ""
+
+  # Auto-fetch metadata when LoRA is selected (true/false)
+  auto_lookup: true
+
+  # Download preview images (true/false)
+  download_previews: true
+
+  # Prefer SFW preview images when available (true/false)
+  prefer_sfw: true
+
+  # Cache directory (relative to donutnodes folder, or absolute path)
+  # Leave empty for default: ./civitai_cache
+  cache_dir: ""

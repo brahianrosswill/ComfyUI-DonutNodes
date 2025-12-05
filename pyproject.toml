@@ -1,0 +1,14 @@
+[project]
+name = "donutnodes"
+description = "ComfyUI-DonutNodes offers custom nodes for grouped weight/bias scaling, per-block SDXL control, dual-branch CLIP blending, block-weighted LoRA stacking, and teacache for sdxl."
+version = "1.0.29"
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/DonutsDelivery/ComfyUI-DonutNodes"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = "donutsdelivery"
+DisplayName = "ComfyUI-DonutNodes"
+Icon = ""
