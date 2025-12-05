@@ -243,9 +243,13 @@ def fetch_model_by_hash(file_hash: str, api_key: Optional[str] = None,
     """
     Fetch model information from CivitAI by file hash.
 
+    The public API works without authentication. API key is optional but provides:
+    - Higher rate limits
+    - Access to restricted/private models
+
     Args:
         file_hash: SHA256 or other supported hash
-        api_key: Optional CivitAI API key (if None, uses config file)
+        api_key: Optional CivitAI API key for higher rate limits
         timeout: Request timeout in seconds
 
     Returns:
@@ -253,7 +257,7 @@ def fetch_model_by_hash(file_hash: str, api_key: Optional[str] = None,
     """
     _rate_limit()
 
-    # Use config API key if none provided
+    # API key is optional - public endpoint works without it
     if api_key is None:
         api_key = get_civitai_api_key()
 

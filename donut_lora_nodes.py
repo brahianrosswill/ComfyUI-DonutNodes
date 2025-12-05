@@ -98,12 +98,8 @@ class DonutLoRAStack:
         individual_infos = ["", "", ""]  # Info for each slot
         collage_images = [None, None, None]  # Collage for each slot (indexed by slot)
 
-        # Get API key from settings
+        # Get API key from settings (optional - public API works without it)
         civitai_api_key = get_civitai_api_key() if HAS_CIVITAI else ""
-
-        # Check if CivitAI lookup is enabled but no API key
-        if civitai_lookup == "On" and HAS_CIVITAI and not civitai_api_key:
-            raise ValueError("CivitAI lookup is enabled but no API key found. Please add your CivitAI API key in Settings -> DonutNodes.CivitAI.ApiKey")
 
         # Get cache and temp directory if CivitAI enabled
         cache = None
