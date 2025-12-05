@@ -562,7 +562,19 @@ class CivitAICache:
             if not images:
                 return None
 
-            # Create collage
+            # Create collage - use unique images only
+            seen_sizes = set()
+            unique_images = []
+            for img in images[:4]:
+                # Use size as a simple duplicate check
+                size_key = (img.width, img.height, img.tobytes()[:1000] if img.width * img.height > 0 else b'')
+                img_hash = hash(size_key)
+                if img_hash not in seen_sizes:
+                    seen_sizes.add(img_hash)
+                    unique_images.append(img)
+
+            images = unique_images
+
             cell_w = collage_size[0] // 2
             cell_h = collage_size[1] // 2
             collage = Image.new("RGB", collage_size, (32, 32, 48))
