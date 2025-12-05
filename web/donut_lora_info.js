@@ -135,92 +135,139 @@ app.registerExtension({
                     };
                 }
 
-                // Create 3 pairs of info text + image display (one per LoRA slot)
-                this.infoWidgets = [];
-                this.imageWidgets = [];
+                // Create combined info+image widgets for each LoRA slot (side by side)
+                this.infoImageWidgets = [];
 
                 for (let i = 1; i <= 3; i++) {
-                    // Text info widget
-                    const infoWidget = ComfyWidgets["STRING"](
-                        this,
-                        `civitai_info_${i}`,
-                        ["STRING", { multiline: true }],
-                        app
-                    ).widget;
+                    // Create container div with flexbox for side-by-side layout
+                    const container = document.createElement("div");
+                    container.style.display = "flex";
+                    container.style.flexDirection = "row";
+                    container.style.gap = "8px";
+                    container.style.backgroundColor = "#1a1a2e";
+                    container.style.borderRadius = "4px";
+                    container.style.padding = "6px";
+                    container.style.minHeight = "120px";
 
-                    infoWidget.inputEl.readOnly = true;
-                    infoWidget.inputEl.style.opacity = "0.9";
-                    infoWidget.inputEl.style.fontSize = "10px";
-                    infoWidget.inputEl.style.fontFamily = "monospace";
-                    infoWidget.inputEl.style.backgroundColor = "#1a1a2e";
-                    infoWidget.inputEl.style.color = "#eee";
-                    infoWidget.inputEl.style.minHeight = "50px";
-                    infoWidget.inputEl.placeholder = `LoRA ${i} info...`;
-                    infoWidget.serializeValue = async () => "";
-                    this.infoWidgets.push(infoWidget);
+                    // Text info side
+                    const textDiv = document.createElement("div");
+                    textDiv.style.flex = "1";
+                    textDiv.style.fontSize = "10px";
+                    textDiv.style.fontFamily = "monospace";
+                    textDiv.style.color = "#eee";
+                    textDiv.style.whiteSpace = "pre-wrap";
+                    textDiv.style.overflow = "hidden";
+                    textDiv.style.padding = "4px";
+                    textDiv.textContent = `LoRA ${i} info...`;
+                    container.appendChild(textDiv);
 
-                    // Image widget for collage
-                    const imgWidget = this.addDOMWidget(`civitai_image_${i}`, "image", document.createElement("div"), {
+                    // Image side
+                    const imgDiv = document.createElement("div");
+                    imgDiv.style.width = "120px";
+                    imgDiv.style.minWidth = "120px";
+                    imgDiv.style.display = "flex";
+                    imgDiv.style.justifyContent = "center";
+                    imgDiv.style.alignItems = "center";
+                    imgDiv.style.overflow = "hidden";
+                    container.appendChild(imgDiv);
+
+                    // Add as single DOM widget
+                    const widget = this.addDOMWidget(`civitai_panel_${i}`, "div", container, {
                         serialize: false,
                     });
-                    imgWidget.element.style.display = "flex";
-                    imgWidget.element.style.justifyContent = "center";
-                    imgWidget.element.style.alignItems = "center";
-                    imgWidget.element.style.backgroundColor = "#1a1a2e";
-                    imgWidget.element.style.minHeight = "128px";
-                    imgWidget.element.style.borderRadius = "4px";
-                    imgWidget.element.style.overflow = "hidden";
-                    imgWidget.computeSize = () => [this.size[0] - 20, 128];
-                    this.imageWidgets.push(imgWidget);
+                    widget.computeSize = () => [this.size[0] - 20, 130];
+
+                    // Store references for updating later
+                    this.infoImageWidgets.push({
+                        widget: widget,
+                        textDiv: textDiv,
+                        imgDiv: imgDiv
+                    });
                 }
 
-                // Adjust node size for 3 text+image pairs
-                this.setSize([this.size[0], this.size[1] + 550]);
+                // Reorder widgets so each LoRA's config is followed by its info panel
+                const reorderedWidgets = [];
+                const widgetsByName = {};
+
+                for (const w of this.widgets) {
+                    widgetsByName[w.name] = w;
+                }
+
+                // Add block_preset and civitai_lookup first
+                if (widgetsByName["block_preset"]) reorderedWidgets.push(widgetsByName["block_preset"]);
+                if (widgetsByName["civitai_lookup"]) reorderedWidgets.push(widgetsByName["civitai_lookup"]);
+
+                // Add each LoRA group: config widgets, then combined info+image panel
+                for (let i = 1; i <= 3; i++) {
+                    const loraWidgets = [
+                        `switch_${i}`,
+                        `lora_name_${i}`,
+                        `model_weight_${i}`,
+                        `clip_weight_${i}`,
+                        `block_vector_${i}`,
+                        `civitai_panel_${i}`
+                    ];
+                    for (const name of loraWidgets) {
+                        if (widgetsByName[name]) {
+                            reorderedWidgets.push(widgetsByName[name]);
+                        }
+                    }
+                }
+
+                // Replace widgets array
+                this.widgets = reorderedWidgets;
+
+                // Adjust node size
+                this.setSize([this.size[0], this.size[1] + 420]);
             };
 
             // Update display when node executes
             const onExecuted = nodeType.prototype.onExecuted;
             nodeType.prototype.onExecuted = function(message) {
-                // Update individual info widgets
+                // Update combined info+image panels
                 // message.text contains [lora_info, trigger_words, urls, info_1, info_2, info_3]
-                if (this.infoWidgets && message.text) {
-                    const info1 = message.text[3] || "";
-                    const info2 = message.text[4] || "";
-                    const info3 = message.text[5] || "";
+                if (this.infoImageWidgets) {
+                    // Update text info for each panel
+                    if (message.text) {
+                        const info1 = message.text[3] || "";
+                        const info2 = message.text[4] || "";
+                        const info3 = message.text[5] || "";
 
-                    this.infoWidgets[0].value = info1 || "LoRA 1: Off or None";
-                    this.infoWidgets[1].value = info2 || "LoRA 2: Off or None";
-                    this.infoWidgets[2].value = info3 || "LoRA 3: Off or None";
-                }
-
-                // Update image widgets with collages
-                if (this.imageWidgets && message.images) {
-                    // message.images is [slot0, slot1, slot2] - may contain null for empty slots
-                    for (let i = 0; i < 3; i++) {
-                        // Clear the widget
-                        this.imageWidgets[i].element.innerHTML = "";
-
-                        const imgData = message.images[i];
-                        if (imgData && imgData.filename) {
-                            const img = document.createElement("img");
-                            img.src = api.apiURL(`/view?filename=${encodeURIComponent(imgData.filename)}&subfolder=${encodeURIComponent(imgData.subfolder || "")}&type=${imgData.type || "temp"}`);
-                            img.style.maxWidth = "100%";
-                            img.style.maxHeight = "128px";
-                            img.style.objectFit = "contain";
-                            img.style.borderRadius = "4px";
-                            this.imageWidgets[i].element.appendChild(img);
-                        } else {
-                            // Show placeholder for empty slot
-                            const placeholder = document.createElement("div");
-                            placeholder.style.color = "#666";
-                            placeholder.style.fontSize = "11px";
-                            placeholder.textContent = `No preview for LoRA ${i + 1}`;
-                            this.imageWidgets[i].element.appendChild(placeholder);
-                        }
+                        this.infoImageWidgets[0].textDiv.textContent = info1 || "LoRA 1: Off or None";
+                        this.infoImageWidgets[1].textDiv.textContent = info2 || "LoRA 2: Off or None";
+                        this.infoImageWidgets[2].textDiv.textContent = info3 || "LoRA 3: Off or None";
                     }
 
-                    // Remove images from message so default handler doesn't show them again
-                    delete message.images;
+                    // Update images for each panel
+                    if (message.images) {
+                        // message.images is [slot0, slot1, slot2] - may contain null for empty slots
+                        for (let i = 0; i < 3; i++) {
+                            // Clear the image div
+                            this.infoImageWidgets[i].imgDiv.innerHTML = "";
+
+                            const imgData = message.images[i];
+                            if (imgData && imgData.filename) {
+                                const img = document.createElement("img");
+                                img.src = api.apiURL(`/view?filename=${encodeURIComponent(imgData.filename)}&subfolder=${encodeURIComponent(imgData.subfolder || "")}&type=${imgData.type || "temp"}`);
+                                img.style.maxWidth = "100%";
+                                img.style.maxHeight = "120px";
+                                img.style.objectFit = "contain";
+                                img.style.borderRadius = "4px";
+                                this.infoImageWidgets[i].imgDiv.appendChild(img);
+                            } else {
+                                // Show placeholder for empty slot
+                                const placeholder = document.createElement("div");
+                                placeholder.style.color = "#666";
+                                placeholder.style.fontSize = "10px";
+                                placeholder.style.textAlign = "center";
+                                placeholder.textContent = "No preview";
+                                this.infoImageWidgets[i].imgDiv.appendChild(placeholder);
+                            }
+                        }
+
+                        // Remove images from message so default handler doesn't show them again
+                        delete message.images;
+                    }
                 }
 
                 // Call original handler (for any other functionality)
