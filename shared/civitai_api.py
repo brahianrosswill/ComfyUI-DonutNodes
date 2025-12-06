@@ -355,14 +355,50 @@ class CivitAICache:
         self.images_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_metadata_path(self, file_hash: str) -> Path:
-        """Get path to metadata JSON file for a hash."""
-        return self.metadata_dir / f"{file_hash[:16]}.json"
+        """Get path to metadata JSON file for a hash.
+
+        Uses first 10 chars of SHA256 for new files, but also checks
+        for legacy 16-char filenames for backward compatibility.
+        """
+        # Primary: use 10 chars (SHA256 prefix for CivitAI compatibility)
+        primary_path = self.metadata_dir / f"{file_hash[:10]}.json"
+        if primary_path.exists():
+            return primary_path
+
+        # Fallback: check for legacy 16-char filename
+        legacy_path = self.metadata_dir / f"{file_hash[:16]}.json"
+        if legacy_path.exists():
+            return legacy_path
+
+        # Return primary path for new files
+        return primary_path
 
     def _get_image_path(self, file_hash: str, ext: str = "jpg", index: int = 0) -> Path:
-        """Get path to preview image file for a hash."""
+        """Get path to preview image file for a hash.
+
+        Uses first 10 chars of SHA256 for consistency.
+        Also checks for legacy 16-char filenames.
+        """
+        hash_prefix = file_hash[:10]
+
         if index == 0:
-            return self.images_dir / f"{file_hash[:16]}.{ext}"
-        return self.images_dir / f"{file_hash[:16]}_{index}.{ext}"
+            primary = self.images_dir / f"{hash_prefix}.{ext}"
+            if primary.exists():
+                return primary
+            # Check legacy 16-char path
+            legacy = self.images_dir / f"{file_hash[:16]}.{ext}"
+            if legacy.exists():
+                return legacy
+            return primary
+        else:
+            primary = self.images_dir / f"{hash_prefix}_{index}.{ext}"
+            if primary.exists():
+                return primary
+            # Check legacy 16-char path
+            legacy = self.images_dir / f"{file_hash[:16]}_{index}.{ext}"
+            if legacy.exists():
+                return legacy
+            return primary
 
     def get_cached_info(self, file_hash: str) -> Optional[CivitAIModelInfo]:
         """
@@ -511,9 +547,14 @@ class CivitAICache:
 
     def get_preview_collage_path(self, file_hash: str) -> Optional[str]:
         """Get path to collage image if it exists."""
-        collage_path = self.images_dir / f"{file_hash[:16]}_collage.jpg"
+        # Check primary (10 char) path
+        collage_path = self.images_dir / f"{file_hash[:10]}_collage.jpg"
         if collage_path.exists():
             return str(collage_path)
+        # Check legacy (16 char) path
+        legacy_path = self.images_dir / f"{file_hash[:16]}_collage.jpg"
+        if legacy_path.exists():
+            return str(legacy_path)
         return None
 
     def create_preview_collage(self, info: CivitAIModelInfo,
@@ -538,10 +579,13 @@ class CivitAICache:
             print("[CivitAI] PIL not available for collage creation")
             return None
 
-        # Check if collage already exists
-        collage_path = self.images_dir / f"{info.local_hash[:16]}_collage.jpg"
+        # Check if collage already exists (check both new and legacy paths)
+        collage_path = self.images_dir / f"{info.local_hash[:10]}_collage.jpg"
         if collage_path.exists():
             return str(collage_path)
+        legacy_collage = self.images_dir / f"{info.local_hash[:16]}_collage.jpg"
+        if legacy_collage.exists():
+            return str(legacy_collage)
 
         # Download images if needed
         image_paths = self.download_multiple_previews(info, max_images=max_images, prefer_sfw=prefer_sfw)

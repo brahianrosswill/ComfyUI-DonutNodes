@@ -43,22 +43,22 @@ def compute_autov2(file_path: str) -> str:
     """
     Compute AutoV2 hash (SHA256 of first 0x10000 bytes).
 
-    This is a legacy hash format used by some tools. It only hashes
-    the first 64KB of the file for faster computation.
+    This is a fast hash format that only reads the first 64KB of the file.
+    CivitAI accepts this for lookups via /api/v1/model-versions/by-hash/:hash
 
     Args:
         file_path: Path to the file
 
     Returns:
-        First 8 characters of SHA256 hash of first 0x10000 bytes (uppercase)
+        First 10 characters of SHA256 hash of first 0x10000 bytes (uppercase)
     """
     sha256_hash = hashlib.sha256()
     with open(file_path, "rb") as f:
         # Read only first 0x10000 (65536) bytes
         data = f.read(0x10000)
         sha256_hash.update(data)
-    # AutoV2 uses first 8 hex characters
-    return sha256_hash.hexdigest()[:8].upper()
+    # AutoV2 uses first 10 hex characters (matches CivitAI format)
+    return sha256_hash.hexdigest()[:10].upper()
 
 
 def compute_blake3(file_path: str, chunk_size: int = 65536) -> Optional[str]:
@@ -223,6 +223,31 @@ def save_hash_cache(file_path: str, hashes: Dict[str, str], cache_dir: Optional[
         return False
 
 
+def compute_single_hash(file_path: str, hash_type: str) -> str:
+    """
+    Compute only the requested hash type.
+
+    Args:
+        file_path: Path to the file
+        hash_type: Type of hash ("SHA256", "AutoV2", "BLAKE3", "CRC32")
+
+    Returns:
+        Hash value as uppercase hex string
+    """
+    if hash_type == "AutoV2":
+        return compute_autov2(file_path)
+    elif hash_type == "BLAKE3":
+        result = compute_blake3(file_path)
+        if result is None:
+            # Fall back to SHA256 if BLAKE3 not available
+            return compute_sha256(file_path)
+        return result
+    elif hash_type == "CRC32":
+        return compute_crc32(file_path)
+    else:  # Default to SHA256
+        return compute_sha256(file_path)
+
+
 def get_or_compute_hash(file_path: str, hash_type: str = "SHA256",
                         use_cache: bool = True, cache_dir: Optional[str] = None) -> str:
     """
@@ -244,10 +269,14 @@ def get_or_compute_hash(file_path: str, hash_type: str = "SHA256",
         if cached and hash_type in cached:
             return cached[hash_type]
 
-    # Compute the requested hash (and others while we're at it for caching)
-    hashes = compute_all_hashes(file_path)
+    # Only compute the requested hash for speed
+    hash_value = compute_single_hash(file_path, hash_type)
 
+    # Cache just this hash (don't compute all hashes)
     if use_cache:
-        save_hash_cache(file_path, hashes, cache_dir)
+        # Get existing cache or create new
+        cached = get_cached_hash(file_path, cache_dir) or {}
+        cached[hash_type] = hash_value
+        save_hash_cache(file_path, cached, cache_dir)
 
-    return hashes.get(hash_type, hashes["SHA256"])
+    return hash_value

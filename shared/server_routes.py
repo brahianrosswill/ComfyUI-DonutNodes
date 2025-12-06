@@ -32,6 +32,13 @@ try:
 except ImportError:
     HAS_CIVITAI = False
 
+# Import hash computation
+try:
+    from .lora_hash import get_or_compute_hash
+    HAS_LORA_HASH = True
+except ImportError:
+    HAS_LORA_HASH = False
+
 
 def register_routes():
     """Register API routes with ComfyUI's server."""
@@ -128,34 +135,46 @@ def register_routes():
     # ============================================
 
     def get_lora_hash(filepath: str) -> str:
-        """Get SHA256 hash of a LoRA file (first 10 chars for lookup)."""
-        # Check for .hash file first (cached by ComfyUI)
-        hash_file = filepath + ".hash"
-        if os.path.exists(hash_file):
-            try:
-                with open(hash_file, 'r') as f:
-                    data = json.load(f)
-                    if 'hashes' in data and 'SHA256' in data['hashes']:
-                        return data['hashes']['SHA256']
-            except:
-                pass
+        """Get hash of a LoRA file for CivitAI lookup.
 
-        # Calculate hash if no cache
-        sha256 = hashlib.sha256()
-        try:
-            with open(filepath, 'rb') as f:
-                # Read first 10MB for speed (usually enough for hash matching)
-                chunk = f.read(10 * 1024 * 1024)
-                sha256.update(chunk)
-            return sha256.hexdigest().upper()
-        except:
-            return ""
+        Uses full SHA256 hash (first 10 chars) which is what CivitAI accepts.
+        The hash is cached for subsequent lookups.
+        """
+        if HAS_LORA_HASH:
+            try:
+                # Full SHA256, cached for speed on subsequent lookups
+                full_hash = get_or_compute_hash(filepath, hash_type="SHA256", use_cache=True)
+                return full_hash[:10]  # CivitAI accepts first 10 chars
+            except Exception as e:
+                print(f"[DonutNodes] Error computing hash: {e}")
+                return ""
+        else:
+            # Fallback: compute full SHA256 manually
+            sha256 = hashlib.sha256()
+            try:
+                with open(filepath, 'rb') as f:
+                    for chunk in iter(lambda: f.read(8192), b''):
+                        sha256.update(chunk)
+                return sha256.hexdigest()[:10].upper()
+            except:
+                return ""
 
     @routes.get('/donut/loras/list')
     async def list_loras(request):
-        """List all available LoRAs with basic info."""
+        """List all available LoRAs with basic info.
+
+        Query params:
+            include_meta: If "true", include cached CivitAI metadata (uses cached hashes only)
+        """
         if not HAS_FOLDER_PATHS:
             return web.json_response({"error": "folder_paths not available"}, status=500)
+
+        include_meta = request.query.get("include_meta", "false").lower() == "true"
+
+        # Get cache if needed
+        cache = None
+        if include_meta and HAS_CIVITAI:
+            cache = CivitAICache()
 
         try:
             lora_paths = folder_paths.get_folder_paths("loras")
@@ -169,11 +188,33 @@ def register_routes():
                         if file.endswith(('.safetensors', '.pt', '.ckpt')):
                             full_path = os.path.join(root, file)
                             rel_path = os.path.relpath(full_path, lora_dir)
-                            loras.append({
+
+                            lora_data = {
                                 "name": rel_path,
                                 "filename": file,
                                 "full_path": full_path
-                            })
+                            }
+
+                            # Add cached metadata if requested (only use cached hash, don't compute)
+                            if include_meta and cache and HAS_LORA_HASH:
+                                from .lora_hash import get_cached_hash
+                                cached_hashes = get_cached_hash(full_path)
+                                if cached_hashes and "SHA256" in cached_hashes:
+                                    file_hash = cached_hashes["SHA256"][:10]
+                                    lora_data["hash"] = file_hash
+                                    info = cache.get_cached_info(file_hash)
+                                    if info:
+                                        lora_data["civitai_name"] = info.model_name
+                                        lora_data["civitai_version"] = info.version_name
+                                        lora_data["base_model"] = info.base_model
+                                        lora_data["has_preview"] = True
+                                    else:
+                                        lora_data["has_preview"] = False
+                                else:
+                                    # No cached hash yet
+                                    lora_data["has_preview"] = False
+
+                            loras.append(lora_data)
 
             # Sort alphabetically
             loras.sort(key=lambda x: x["name"].lower())
@@ -209,16 +250,7 @@ def register_routes():
                 })
 
             # Get cache
-            cache_dir = get_civitai_cache_dir()
-            cache = CivitAICache(cache_dir) if cache_dir else None
-
-            if not cache:
-                return web.json_response({
-                    "name": lora_name,
-                    "hash": file_hash[:16],
-                    "civitai": None,
-                    "error": "Cache not available"
-                })
+            cache = CivitAICache()  # Uses default cache dir if none configured
 
             # Try to get cached info first
             info = cache.get_cached_info(file_hash)
@@ -228,35 +260,39 @@ def register_routes():
                 info = cache.get_or_fetch_info(file_hash, download_preview=True)
 
             if info:
-                # Get preview images
+                # Get preview images using cache helper methods
+                hash_prefix = file_hash[:10]  # AutoV2 format
                 preview_paths = []
                 for i in range(4):
-                    for ext in ['jpg', 'png', 'webp']:
-                        if i == 0:
-                            img_path = cache.images_dir / f"{file_hash[:16]}.{ext}"
-                        else:
-                            img_path = cache.images_dir / f"{file_hash[:16]}_{i}.{ext}"
-                        if img_path.exists():
-                            preview_paths.append(str(img_path))
-                            break
+                    img_path = cache._get_image_path(file_hash, 'jpg', i)
+                    if img_path.exists():
+                        preview_paths.append(str(img_path))
+                    else:
+                        # Try other extensions
+                        for ext in ['png', 'webp']:
+                            img_path = cache._get_image_path(file_hash, ext, i)
+                            if img_path.exists():
+                                preview_paths.append(str(img_path))
+                                break
 
                 # Check for collage
-                collage_path = cache.images_dir / f"{file_hash[:16]}_collage.jpg"
-                if not collage_path.exists():
+                collage_path = cache.get_preview_collage_path(file_hash)
+                if not collage_path:
                     # Create collage if doesn't exist
                     cache.create_preview_collage(info, max_images=4)
+                    collage_path = cache.get_preview_collage_path(file_hash)
 
                 return web.json_response({
                     "name": lora_name,
-                    "hash": file_hash[:16],
+                    "hash": hash_prefix,
                     "civitai": info.to_dict(),
                     "preview_count": len(preview_paths),
-                    "has_collage": collage_path.exists()
+                    "has_collage": collage_path is not None
                 })
             else:
                 return web.json_response({
                     "name": lora_name,
-                    "hash": file_hash[:16],
+                    "hash": file_hash[:10],
                     "civitai": None,
                     "error": "Not found on CivitAI"
                 })
@@ -279,11 +315,8 @@ def register_routes():
             return web.json_response({"error": "No hash provided"}, status=400)
 
         try:
-            cache_dir = get_civitai_cache_dir()
-            if not cache_dir:
-                return web.json_response({"error": "Cache not available"}, status=500)
-
-            images_dir = Path(cache_dir) / "images"
+            cache = CivitAICache()  # Uses default cache dir if none configured
+            images_dir = cache.images_dir
 
             # Find the image
             if image_type == "collage":
