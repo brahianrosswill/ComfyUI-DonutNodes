@@ -355,11 +355,164 @@ class LoraLoaderBlockWeight:
             return ",".join(res)
 
     @staticmethod
+    def transform_separate_to_fused_qkv(lora, key_map, model):
+        """
+        Transform a LoRA with separate Q/K/V attention keys to work with fused QKV models.
+        This handles Lumina2/Z-Image LoRAs trained on diffusers implementations.
+        """
+        new_lora = dict(lora)  # Copy original
+
+        # Get the model's state dict to understand the QKV dimensions
+        sd = model.model.state_dict()
+
+        # Find all layers that have separate Q/K/V in the LoRA
+        # Pattern: diffusion_model.layers.X.attention.to_q.lora_A.weight
+        layer_pattern = re.compile(r'diffusion_model\.layers\.(\d+)\.attention\.to_([qkv])\.lora_([AB])\.weight')
+
+        # Group by layer number
+        layers_data = {}
+        for key in list(lora.keys()):
+            match = layer_pattern.match(key)
+            if match:
+                layer_num = int(match.group(1))
+                qkv_type = match.group(2)  # q, k, or v
+                ab_type = match.group(3)   # A or B
+
+                if layer_num not in layers_data:
+                    layers_data[layer_num] = {}
+                if qkv_type not in layers_data[layer_num]:
+                    layers_data[layer_num][qkv_type] = {}
+                layers_data[layer_num][qkv_type][ab_type] = key
+
+        if not layers_data:
+            return lora
+
+        # For each layer, create fused QKV LoRA entries
+        for layer_num, qkv_data in layers_data.items():
+            # Check if we have all Q, K, V
+            if 'q' not in qkv_data or 'k' not in qkv_data or 'v' not in qkv_data:
+                continue
+            if 'A' not in qkv_data['q'] or 'B' not in qkv_data['q']:
+                continue
+
+            # Get the model's fused QKV key to understand dimensions
+            model_qkv_key = f"diffusion_model.layers.{layer_num}.attention.qkv.weight"
+            if model_qkv_key not in sd:
+                continue
+
+            qkv_weight = sd[model_qkv_key]
+            total_dim = qkv_weight.shape[0]  # e.g., (n_heads + 2*n_kv_heads) * head_dim
+            in_dim = qkv_weight.shape[1]     # hidden_size
+
+            # Get LoRA weights
+            q_A = lora[qkv_data['q']['A']]
+            q_B = lora[qkv_data['q']['B']]
+            k_A = lora[qkv_data['k']['A']]
+            k_B = lora[qkv_data['k']['B']]
+            v_A = lora[qkv_data['v']['A']]
+            v_B = lora[qkv_data['v']['B']]
+
+            # Get dimensions from LoRA weights
+            # lora_A: [rank, in_dim], lora_B: [out_dim, rank]
+            rank = q_A.shape[0]
+            q_out_dim = q_B.shape[0]
+            k_out_dim = k_B.shape[0]
+            v_out_dim = v_B.shape[0]
+
+            # Verify dimensions add up correctly (continue anyway for GQA with different K/V heads)
+            expected_total = q_out_dim + k_out_dim + v_out_dim
+
+            # Create fused LoRA weights
+            # For lora_A, we need to keep the same input dimension and rank
+            # Since all Q/K/V share the same input, we can use any of them
+            # For lora_B, we concatenate Q, K, V along the output dimension
+
+            # The LoRA formula is: W' = W + alpha * (B @ A) / rank
+            # For fused QKV: [Q_B @ Q_A; K_B @ K_A; V_B @ V_A]
+            # We can't simply concatenate A matrices since they share input
+            # But we can create a block-diagonal A and concatenated B
+
+            # Alternative approach: Create 3 separate patches with offsets
+            # This is cleaner and avoids tensor manipulation issues
+
+            # Add Q patch with offset
+            fused_q_key_A = f"diffusion_model.layers.{layer_num}.attention.qkv_q.lora_A.weight"
+            fused_q_key_B = f"diffusion_model.layers.{layer_num}.attention.qkv_q.lora_B.weight"
+            new_lora[fused_q_key_A] = q_A
+            new_lora[fused_q_key_B] = q_B
+
+            # Add alpha if present
+            alpha_q_key = qkv_data['q']['A'].replace('.lora_A.weight', '.alpha')
+            if alpha_q_key in lora:
+                new_lora[fused_q_key_A.replace('.lora_A.weight', '.alpha')] = lora[alpha_q_key]
+
+            # For K and V, we need to use offset mechanism
+            # But ComfyUI's LoRA format doesn't directly support offsets in key names
+            # We need to use the key_map tuple format: (target_key, (dim, offset, size))
+
+            # Actually, let's just add mappings to key_map for Q, K, V separately
+            # with appropriate offsets
+
+            # The model key for Q is: diffusion_model.layers.X.attention.qkv.weight
+            # We map our Q lora to target the Q portion (offset 0, size q_out_dim)
+            # We map K lora to target K portion (offset q_out_dim, size k_out_dim)
+            # We map V lora to target V portion (offset q_out_dim+k_out_dim, size v_out_dim)
+
+            base_q = f"diffusion_model.layers.{layer_num}.attention.to_q"
+            base_k = f"diffusion_model.layers.{layer_num}.attention.to_k"
+            base_v = f"diffusion_model.layers.{layer_num}.attention.to_v"
+
+            # Add key mappings with offsets
+            key_map[base_q] = (model_qkv_key, (0, 0, q_out_dim))
+            key_map[base_k] = (model_qkv_key, (0, q_out_dim, k_out_dim))
+            key_map[base_v] = (model_qkv_key, (0, q_out_dim + k_out_dim, v_out_dim))
+
+            # Remove the separate keys we don't need anymore from new_lora
+            # (keep originals, let load_lora find them via key_map)
+            if fused_q_key_A in new_lora:
+                del new_lora[fused_q_key_A]
+            if fused_q_key_B in new_lora:
+                del new_lora[fused_q_key_B]
+
+        return new_lora
+
+    @staticmethod
     def load_lbw(model, clip, lora, inverse, seed, A, B, block_vector):
         key_map = comfy.lora.model_lora_keys_unet(model.model)
         # Only process CLIP keys if clip model is provided (some LoRAs are UNet-only)
         if clip is not None:
             key_map = comfy.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
+
+        # Check if we have Lumina2/Z-Image LoRA with separate attention keys
+        # that need to be mapped to fused QKV format
+        lora_has_separate_attn = any("attention.to_q" in k or "attention.to_k" in k or "attention.to_v" in k for k in lora.keys())
+
+        # Check model state dict directly for fused QKV
+        model_sd = model.model.state_dict()
+        model_has_fused_qkv = any("attention.qkv" in k for k in model_sd.keys())
+
+        if lora_has_separate_attn and model_has_fused_qkv:
+            # Transform separate Q/K/V LoRA keys to work with fused QKV model
+            lora = LoraLoaderBlockWeight.transform_separate_to_fused_qkv(lora, key_map, model)
+
+        # Handle to_out.0 -> out mapping for attention output projections
+        lora_has_to_out = any(".attention.to_out.0." in k for k in lora.keys())
+        model_sd = model.model.state_dict()
+        if lora_has_to_out:
+            # Find unique layer numbers that need to_out mapping
+            layer_pattern = re.compile(r'diffusion_model\.layers\.(\d+)\.attention\.to_out\.0\.lora_[AB]\.weight')
+            layers_needing_out_mapping = set()
+            for lora_key in lora.keys():
+                match = layer_pattern.match(lora_key)
+                if match:
+                    layers_needing_out_mapping.add(int(match.group(1)))
+
+            for layer_num in layers_needing_out_mapping:
+                base_key = f"diffusion_model.layers.{layer_num}.attention.to_out.0"
+                model_key = f"diffusion_model.layers.{layer_num}.attention.out.weight"
+                if model_key in model_sd and base_key not in key_map:
+                    key_map[base_key] = model_key
+
         loaded = comfy.lora.load_lora(lora, key_map)
 
         block_vector = LoraLoaderBlockWeight.block_spec_parser(loaded, block_vector)
@@ -495,28 +648,21 @@ class LoraLoaderBlockWeight:
 
         muted_weights = set(muted_weights)
 
-        print(f"[LoraLoaderBlockWeight] DEBUG: About to apply patches with strength_model={strength_model}")
-        ratio_samples = []
-        
         for k, v in block_weights.items():
             weights, ratio = v
-            ratio_samples.append(ratio)
+
+            # Extract string key for checking (handle tuple keys with offset info)
+            key_str = k[0] if isinstance(k, tuple) else k
 
             if k in muted_weights:
                 pass
-            elif 'text' in k or 'encoder' in k:
+            elif 'text' in key_str or 'encoder' in key_str:
                 if new_clip is not None:
                     final_strength = strength_clip * ratio
-                    print(f"[LoraLoaderBlockWeight] DEBUG: CLIP patch {k[:50]}... applied with final_strength={final_strength} (strength_clip={strength_clip} * ratio={ratio})")
                     new_clip.add_patches({k: weights}, final_strength)
             else:
                 final_strength = strength_model * ratio
-                if len(ratio_samples) <= 3:  # Only log first few to avoid spam
-                    print(f"[LoraLoaderBlockWeight] DEBUG: UNet patch {k[:50]}... applied with final_strength={final_strength} (strength_model={strength_model} * ratio={ratio})")
                 new_modelpatcher.add_patches({k: weights}, final_strength)
-        
-        print(f"[LoraLoaderBlockWeight] DEBUG: Applied {len(block_weights)} patches. Sample ratios: {ratio_samples[:5]}")
-        print(f"[LoraLoaderBlockWeight] DEBUG: Min ratio: {min(ratio_samples) if ratio_samples else 'N/A'}, Max ratio: {max(ratio_samples) if ratio_samples else 'N/A'}")
 
         return new_modelpatcher, new_clip, populated_vector
 

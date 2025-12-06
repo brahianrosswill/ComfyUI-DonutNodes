@@ -224,32 +224,19 @@ class DonutApplyLoRAStack:
             "https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes/"
             "wiki/LoRA-Nodes#cr-apply-lora-stack"
         )
-        
-        print(f"[DonutApplyLoRAStack] DEBUG: lora_stack type: {type(lora_stack)}")
-        print(f"[DonutApplyLoRAStack] DEBUG: lora_stack value: {lora_stack}")
-        
-        if lora_stack is None:
-            print("[DonutApplyLoRAStack] No LoRAs to apply - lora_stack is None")
-            return (model, clip, help_url)
-            
-        if len(lora_stack) == 0:
-            print("[DonutApplyLoRAStack] No LoRAs to apply - lora_stack is empty")
+
+        if lora_stack is None or len(lora_stack) == 0:
             return (model, clip, help_url)
 
-        print(f"[DonutApplyLoRAStack] Applying {len(lora_stack)} LoRAs to model and clip")
         unet, text_enc = model, clip
-        loader         = LoraLoaderBlockWeight()
+        loader = LoraLoaderBlockWeight()
 
         for i, (name, mw, cw, bv) in enumerate(lora_stack):
             try:
-                print(f"[DonutApplyLoRAStack] Processing LoRA {i+1}/{len(lora_stack)}: {name} (model:{mw}, clip:{cw}, vector:{bv})")
-                
                 if mw == 0.0 and cw == 0.0:
-                    print(f"[DonutApplyLoRAStack] WARNING: Both model and clip strengths are 0.0 for {name} - skipping")
                     continue
-                
+
                 path = folder_paths.get_full_path("loras", name)
-                print(f"[DonutApplyLoRAStack] Loading LoRA from: {path}")
                 lora = comfy.utils.load_torch_file(path, safe_load=True)
 
                 # Auto-detect block count from LoRA keys if no vector provided
@@ -273,92 +260,34 @@ class DonutApplyLoRAStack:
                     if block_nums:  # Z-Image detected
                         num_blocks = max(block_nums) + 1
                         vector = ",".join(["1"] * (num_blocks + 1))  # +1 for base
-                        print(f"[DonutApplyLoRAStack] Auto-detected Z-Image with {num_blocks} layers")
                     else:
                         vector = ",".join(["1"] * 13)  # Default: base + 12 blocks (SDXL)
 
-                print(f"[DonutApplyLoRAStack] Using block vector: {vector}")
-
                 # 1) block-weighted UNet merge (clip_strength=0)
                 if mw != 0.0:
-                    print(f"[DonutApplyLoRAStack] Applying UNet merge with strength {mw}")
-                    print(f"[DonutApplyLoRAStack] DEBUG: UNet model before LoRA: {type(unet)}")
-                    print(f"[DonutApplyLoRAStack] DEBUG: LoRA keys in file: {len(lora.keys())}")
-                    print(f"[DonutApplyLoRAStack] DEBUG: First few LoRA keys: {list(lora.keys())[:5]}")
-                    
-                    unet_before_id = id(unet)
-                    print(f"[DonutApplyLoRAStack] DEBUG: About to call load_lora_for_models with strength={mw}, A=1.0, B=1.0, vector='{vector}'")
                     unet, text_enc, _ = loader.load_lora_for_models(
                         unet, text_enc, lora,
-                        strength_model=    mw,
-                        strength_clip=     0.0,
-                        inverse=           False,
-                        seed=              0,
-                        A=                 1.0,
-                        B=                 1.0,
-                        block_vector=      vector
+                        strength_model=mw,
+                        strength_clip=0.0,
+                        inverse=False,
+                        seed=0,
+                        A=1.0,
+                        B=1.0,
+                        block_vector=vector
                     )
-                    print(f"[DonutApplyLoRAStack] DEBUG: load_lora_for_models completed")
-                    unet_after_id = id(unet)
-                    print(f"[DonutApplyLoRAStack] DEBUG: UNet model after LoRA: {type(unet)}")
-                    print(f"[DonutApplyLoRAStack] DEBUG: UNet object changed: {unet_before_id != unet_after_id}")
-                    
-                    # Check if the model actually has patches applied
-                    if hasattr(unet, 'patches'):
-                        print(f"[DonutApplyLoRAStack] DEBUG: Model patches count: {len(unet.patches)}")
-                        if len(unet.patches) > 0:
-                            print(f"[DonutApplyLoRAStack] DEBUG: Sample patch keys: {list(unet.patches.keys())[:3]}")
-                    else:
-                        print(f"[DonutApplyLoRAStack] DEBUG: Model has no patches attribute")
 
                 # 2) uniform CLIP merge (no block control)
                 if cw != 0.0:
-                    print(f"[DonutApplyLoRAStack] Applying CLIP merge with strength {cw}")
-                    clip_before_id = id(text_enc)
                     unet, text_enc = comfy.sd.load_lora_for_models(
                         unet, text_enc, lora,
-                        0.0,               # no UNet change
-                        cw                 # clip strength
+                        0.0,  # no UNet change
+                        cw    # clip strength
                     )
-                    clip_after_id = id(text_enc)
-                    print(f"[DonutApplyLoRAStack] DEBUG: CLIP object changed: {clip_before_id != clip_after_id}")
-                    
-                    # Check CLIP patches
-                    if hasattr(text_enc, 'patches'):
-                        print(f"[DonutApplyLoRAStack] DEBUG: CLIP patches count: {len(text_enc.patches)}")
-                else:
-                    print(f"[DonutApplyLoRAStack] DEBUG: Skipping CLIP merge (strength=0.0)")
-                    
-                print(f"[DonutApplyLoRAStack] Successfully applied LoRA: {name}")
-                
+
             except Exception as e:
-                print(f"[DonutApplyLoRAStack] ERROR applying LoRA {name}: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                print(f"[DonutApplyLoRAStack] Error applying LoRA {name}: {e}")
                 continue
 
-        print(f"[DonutApplyLoRAStack] Completed applying all {len(lora_stack)} LoRAs")
-        
-        # CRITICAL DEBUG: Verify the models being returned have patches
-        print(f"🔥 [DonutApplyLoRAStack] RETURNING MODEL TYPE: {type(unet)}")
-        print(f"🔥 [DonutApplyLoRAStack] RETURNING MODEL ID: {id(unet)}")
-        if hasattr(unet, 'patches'):
-            print(f"🔥 [DonutApplyLoRAStack] RETURNING MODEL PATCHES COUNT: {len(unet.patches)}")
-            if len(unet.patches) > 0:
-                print(f"🔥 [DonutApplyLoRAStack] RETURNING MODEL SAMPLE PATCH KEYS: {list(unet.patches.keys())[:3]}")
-                # Verify patches have actual content
-                first_patch_key = list(unet.patches.keys())[0]
-                patch_data = unet.patches[first_patch_key]
-                print(f"🔥 [DonutApplyLoRAStack] FIRST PATCH DATA TYPE: {type(patch_data)}")
-        else:
-            print(f"🔥 [DonutApplyLoRAStack] WARNING: RETURNING MODEL HAS NO PATCHES ATTRIBUTE!")
-            
-        print(f"🔥 [DonutApplyLoRAStack] RETURNING CLIP TYPE: {type(text_enc)}")
-        if hasattr(text_enc, 'patches'):
-            print(f"🔥 [DonutApplyLoRAStack] RETURNING CLIP PATCHES COUNT: {len(text_enc.patches)}")
-        else:
-            print(f"🔥 [DonutApplyLoRAStack] RETURNING CLIP HAS NO PATCHES ATTRIBUTE")
-        
         return (unet, text_enc, help_url)
 
 
