@@ -46,6 +46,10 @@ from .DonutKSamplerCFGLinear import NODE_DISPLAY_NAME_MAPPINGS as d_donut_sample
 from .donut_lora_civitai import NODE_CLASS_MAPPINGS        as m_lora_civitai
 from .donut_lora_civitai import NODE_DISPLAY_NAME_MAPPINGS as d_lora_civitai
 
+# Tiled Upscale
+from .DonutTiledUpscale import NODE_CLASS_MAPPINGS        as m_tiled_upscale
+from .DonutTiledUpscale import NODE_DISPLAY_NAME_MAPPINGS as d_tiled_upscale
+
 # build globals
 NODE_CLASS_MAPPINGS = {
     **m1, **m2, **m3, **m4, **m5,
@@ -59,6 +63,7 @@ NODE_CLASS_MAPPINGS = {
     **m_spectral_sharpener,
     **m_donut_sampler,
     **m_lora_civitai,
+    **m_tiled_upscale,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -71,6 +76,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **d_spectral_sharpener,
     **d_donut_sampler,
     **d_lora_civitai,
+    **d_tiled_upscale,
 }
 
 # Web directory for custom JavaScript extensions
