@@ -315,6 +315,16 @@ class DonutLoraBrowser {
         cancelBtn.style.cssText = this.getButtonStyle();
         cancelBtn.onclick = () => this.close();
 
+        const civitaiBtn = document.createElement("button");
+        civitaiBtn.textContent = "🌐 CivitAI";
+        civitaiBtn.style.cssText = this.getButtonStyle() + "background: #3a5a9a;";
+        civitaiBtn.onclick = () => {
+            this.close();
+            if (window.DonutCivitaiBrowser) {
+                window.DonutCivitaiBrowser.show();
+            }
+        };
+
         const selectBtn = document.createElement("button");
         selectBtn.textContent = "Select LoRA";
         selectBtn.id = "donut-lora-select";
@@ -322,6 +332,7 @@ class DonutLoraBrowser {
         selectBtn.onclick = () => this.selectCurrent();
 
         buttons.appendChild(cancelBtn);
+        buttons.appendChild(civitaiBtn);
         buttons.appendChild(selectBtn);
         footer.appendChild(hints);
         footer.appendChild(buttons);
@@ -531,12 +542,11 @@ class DonutLoraBrowser {
             ${c.rating ? ` | Rating: ${c.rating.toFixed(1)}` : ""}
         </div>`;
 
-        // Description (stripped of HTML, truncated)
+        // Description (stripped of HTML)
         if (c.description) {
             const desc = c.description.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-            const truncated = desc.length > 300 ? desc.substring(0, 300) + "..." : desc;
-            html += `<div style="margin-bottom: 8px; color: #aaa; font-size: 11px;">
-                ${truncated}
+            html += `<div style="margin-bottom: 8px; color: #aaa; font-size: 11px; max-height: 150px; overflow-y: auto; padding-right: 5px;">
+                ${desc}
             </div>`;
         }
 
@@ -975,6 +985,24 @@ class DonutLoraGridBrowser {
         `;
         fetchAllBtn.onclick = () => this.fetchAllInfo();
 
+        const civitaiBtn = document.createElement("button");
+        civitaiBtn.textContent = "🌐 CivitAI Browser";
+        civitaiBtn.style.cssText = `
+            background: #3a5a9a;
+            color: #eee;
+            border: 1px solid #4a7aca;
+            border-radius: 4px;
+            padding: 8px 15px;
+            cursor: pointer;
+            font-size: 13px;
+        `;
+        civitaiBtn.onclick = () => {
+            this.close();
+            if (window.DonutCivitaiBrowser) {
+                window.DonutCivitaiBrowser.show();
+            }
+        };
+
         const cancelBtn = document.createElement("button");
         cancelBtn.textContent = "Cancel";
         cancelBtn.style.cssText = `
@@ -990,6 +1018,7 @@ class DonutLoraGridBrowser {
 
         buttonsContainer.appendChild(refreshContainer);
         buttonsContainer.appendChild(fetchAllBtn);
+        buttonsContainer.appendChild(civitaiBtn);
         buttonsContainer.appendChild(cancelBtn);
         footer.appendChild(hints);
         footer.appendChild(buttonsContainer);

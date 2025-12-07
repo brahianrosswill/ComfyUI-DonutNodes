@@ -9,6 +9,7 @@ import json
 import os
 import urllib.request
 import urllib.error
+import urllib.parse
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
@@ -290,6 +291,170 @@ def fetch_model_by_hash(file_hash: str, api_key: Optional[str] = None,
         print(f"[CivitAI] Invalid JSON response")
     except Exception as e:
         print(f"[CivitAI] Error fetching model info: {e}")
+
+    return None
+
+
+def search_models(
+    query: str = "",
+    types: List[str] = None,
+    sort: str = "Most Downloaded",
+    period: str = "AllTime",
+    nsfw: bool = False,
+    base_models: List[str] = None,
+    limit: int = 20,
+    page: int = 1,
+    cursor: str = None,
+    api_key: Optional[str] = None,
+    timeout: int = 30,
+    tag: Optional[str] = None,
+    username: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Search for models on CivitAI.
+
+    Args:
+        query: Search query string
+        types: List of model types (LORA, Checkpoint, TextualInversion, etc.)
+        sort: Sort order (Highest Rated, Most Downloaded, Newest)
+        period: Time period (AllTime, Year, Month, Week, Day)
+        nsfw: Include NSFW content
+        base_models: Filter by base models (SD 1.5, SDXL 1.0, Pony, etc.)
+        limit: Results per page (1-100)
+        page: Page number (fallback if cursor not provided)
+        cursor: Cursor for pagination (preferred over page)
+        api_key: Optional CivitAI API key
+        timeout: Request timeout
+        tag: Filter by tag
+        username: Filter by creator username
+
+    Returns:
+        Dict with 'items' (list of models) and 'metadata' (pagination info)
+    """
+    _rate_limit()
+
+    if api_key is None:
+        api_key = get_civitai_api_key()
+
+    # Build query parameters
+    params = {
+        "limit": min(max(1, limit), 100),
+        "sort": sort,
+        "period": period,
+    }
+
+    # CivitAI API supports both cursor and page-based pagination
+    # Cursor is preferred for reliable pagination
+    if cursor:
+        params["cursor"] = cursor
+    else:
+        params["page"] = max(1, page)
+
+    if query:
+        params["query"] = query
+
+    # CivitAI API: nsfw=true shows NSFW content, nsfw=false or omitted shows SFW only
+    # We explicitly set it either way for clarity
+    params["nsfw"] = "true" if nsfw else "false"
+
+    if tag:
+        params["tag"] = tag
+
+    if username:
+        params["username"] = username
+
+    # Build URL using proper URL encoding
+    # Note: types and baseModels need to be repeated params, not comma-separated
+    query_string = urllib.parse.urlencode(params)
+
+    # Add types as repeated params (types=LORA&types=LoCon&types=DoRA)
+    if types:
+        types_list = types if isinstance(types, list) else [types]
+        for t in types_list:
+            query_string += f"&types={urllib.parse.quote(t)}"
+
+    # Add baseModels as repeated params
+    if base_models:
+        base_models_list = base_models if isinstance(base_models, list) else [base_models]
+        for b in base_models_list:
+            query_string += f"&baseModels={urllib.parse.quote(b)}"
+
+    url = f"{CIVITAI_API_BASE}/models?{query_string}"
+
+    print(f"[CivitAI] Searching: {url}")
+
+    headers = {
+        "User-Agent": "ComfyUI-DonutNodes/1.0",
+        "Accept": "application/json"
+    }
+
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode("utf-8"))
+                metadata = data.get("metadata", {})
+                print(f"[CivitAI] Found {len(data.get('items', []))} items, page {metadata.get('currentPage')}, hasNextPage: {metadata.get('nextPage') is not None}")
+                return data
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            print(f"[CivitAI] Rate limited - try again later")
+        else:
+            print(f"[CivitAI] HTTP error {e.code}: {e.reason}")
+    except urllib.error.URLError as e:
+        print(f"[CivitAI] Connection error: {e.reason}")
+    except json.JSONDecodeError:
+        print(f"[CivitAI] Invalid JSON response")
+    except Exception as e:
+        print(f"[CivitAI] Error searching models: {e}")
+
+    return None
+
+
+def get_model_by_id(model_id: int, api_key: Optional[str] = None, timeout: int = 30) -> Optional[Dict[str, Any]]:
+    """
+    Get detailed model information by ID.
+
+    Args:
+        model_id: CivitAI model ID
+        api_key: Optional API key
+        timeout: Request timeout
+
+    Returns:
+        Model data dict or None
+    """
+    _rate_limit()
+
+    if api_key is None:
+        api_key = get_civitai_api_key()
+
+    url = f"{CIVITAI_API_BASE}/models/{model_id}"
+
+    headers = {
+        "User-Agent": "ComfyUI-DonutNodes/1.0",
+        "Accept": "application/json"
+    }
+
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status == 200:
+                return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"[CivitAI] Model {model_id} not found")
+        elif e.code == 429:
+            print(f"[CivitAI] Rate limited - try again later")
+        else:
+            print(f"[CivitAI] HTTP error {e.code}: {e.reason}")
+    except Exception as e:
+        print(f"[CivitAI] Error fetching model {model_id}: {e}")
 
     return None
 

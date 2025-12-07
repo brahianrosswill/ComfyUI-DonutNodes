@@ -81,6 +81,22 @@ app.registerExtension({
             },
         });
 
+        // Show/hide CivitAI browser button
+        app.ui.settings.addSetting({
+            id: "DonutNodes.CivitAI.ShowBrowserButton",
+            name: "[DonutNodes] Show CivitAI Browser button",
+            type: "boolean",
+            defaultValue: true,
+            tooltip: "Show the floating CivitAI browser button in the UI",
+            onChange(value) {
+                // Update button visibility immediately
+                const btn = document.getElementById("donut-civitai-btn");
+                if (btn) {
+                    btn.style.display = value ? "block" : "none";
+                }
+            },
+        });
+
         // Load current settings from server
         try {
             const response = await api.fetchApi("/donut/config");

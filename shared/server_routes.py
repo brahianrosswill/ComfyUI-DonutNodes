@@ -8,6 +8,7 @@ that can be called from the JavaScript frontend.
 import json
 import os
 import hashlib
+import urllib.request
 from aiohttp import web
 from pathlib import Path
 
@@ -27,10 +28,17 @@ from .config import load_config, save_config, get_config
 
 # Import CivitAI cache for LoRA browser
 try:
-    from .civitai_api import CivitAICache, get_civitai_cache_dir
+    from .civitai_api import CivitAICache, get_civitai_cache_dir, search_models, get_model_by_id
     HAS_CIVITAI = True
 except ImportError:
     HAS_CIVITAI = False
+
+# Import download manager
+try:
+    from .civitai_download import get_downloader, get_download_path, normalize_base_model, invalidate_folder_cache, MODEL_TYPE_TO_FOLDER
+    HAS_DOWNLOADER = True
+except ImportError:
+    HAS_DOWNLOADER = False
 
 # Import hash computation
 try:
@@ -200,8 +208,10 @@ def register_routes():
                                 from .lora_hash import get_cached_hash
                                 cached_hashes = get_cached_hash(full_path)
                                 if cached_hashes and "SHA256" in cached_hashes:
-                                    file_hash = cached_hashes["SHA256"][:10]
+                                    full_sha256 = cached_hashes["SHA256"]
+                                    file_hash = full_sha256[:10]
                                     lora_data["hash"] = file_hash
+                                    lora_data["sha256"] = full_sha256  # Full hash for deletion
                                     info = cache.get_cached_info(file_hash)
                                     if info:
                                         lora_data["civitai_name"] = info.model_name
@@ -348,6 +358,524 @@ def register_routes():
             else:
                 return web.json_response({"error": "Image not found"}, status=404)
 
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ============================================
+    # CivitAI Browser/Search Routes
+    # ============================================
+
+    @routes.get('/donut/civitai/search')
+    async def civitai_search(request):
+        """Search CivitAI models."""
+        if not HAS_CIVITAI:
+            return web.json_response({"error": "CivitAI module not available"}, status=500)
+
+        try:
+            # Parse query parameters
+            query = request.query.get("query", "")
+            # Handle multiple types (can be repeated params or comma-separated)
+            types_list = request.query.getall("types", [])
+            if not types_list:
+                types_single = request.query.get("types", "")
+                types_list = [t.strip() for t in types_single.split(",") if t.strip()] if types_single else None
+            else:
+                types_list = [t for t in types_list if t.strip()]
+                types_list = types_list if types_list else None
+            sort = request.query.get("sort", "Highest Rated")
+            period = request.query.get("period", "AllTime")
+            nsfw = request.query.get("nsfw", "false").lower() == "true"
+            # Handle multiple baseModels (can be repeated params or comma-separated)
+            base_models_list = request.query.getall("baseModels", [])
+            if not base_models_list:
+                base_models_single = request.query.get("baseModels", "")
+                base_models_list = [b.strip() for b in base_models_single.split(",") if b.strip()] if base_models_single else None
+            else:
+                base_models_list = [b for b in base_models_list if b.strip()]
+                base_models_list = base_models_list if base_models_list else None
+            limit = int(request.query.get("limit", "20"))
+            page = int(request.query.get("page", "1"))
+            cursor = request.query.get("cursor", "")  # Cursor for pagination
+            tag = request.query.get("tag", "")
+            username = request.query.get("username", "")
+
+            print(f"[CivitAI Search] query={query}, types={types_list}, page={page}, cursor={cursor[:20] if cursor else 'None'}, nsfw={nsfw}, baseModels={base_models_list}")
+
+            # Get API key from config
+            config = load_config()
+            api_key = config.get("civitai", {}).get("api_key")
+
+            # Perform search
+            result = search_models(
+                query=query,
+                types=types_list,
+                sort=sort,
+                period=period,
+                nsfw=nsfw,
+                base_models=base_models_list,
+                limit=limit,
+                page=page,
+                cursor=cursor if cursor else None,
+                api_key=api_key,
+                tag=tag if tag else None,
+                username=username if username else None
+            )
+
+            if result:
+                return web.json_response(result)
+            else:
+                return web.json_response({"items": [], "metadata": {"totalItems": 0, "currentPage": 1, "pageSize": limit}})
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.get('/donut/civitai/model/{model_id}')
+    async def civitai_get_model(request):
+        """Get detailed model info by ID."""
+        if not HAS_CIVITAI:
+            return web.json_response({"error": "CivitAI module not available"}, status=500)
+
+        try:
+            model_id = int(request.match_info['model_id'])
+
+            # Get API key from config
+            config = load_config()
+            api_key = config.get("civitai", {}).get("api_key")
+
+            result = get_model_by_id(model_id, api_key=api_key)
+
+            if result:
+                return web.json_response(result)
+            else:
+                return web.json_response({"error": "Model not found"}, status=404)
+
+        except ValueError:
+            return web.json_response({"error": "Invalid model ID"}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.post('/donut/civitai/download')
+    async def civitai_download(request):
+        """Start a model download."""
+        if not HAS_DOWNLOADER:
+            return web.json_response({"error": "Download module not available"}, status=500)
+
+        try:
+            data = await request.json()
+            download_url = data.get("downloadUrl")
+            model_type = data.get("modelType", "LORA")
+            base_model = data.get("baseModel", "")
+            filename = data.get("filename", "model.safetensors")
+            sha256 = data.get("sha256")  # Pre-known hash from CivitAI
+
+            if not download_url:
+                return web.json_response({"error": "No download URL provided"}, status=400)
+
+            # Get download path based on model type and base model
+            save_path = get_download_path(model_type, base_model, filename)
+
+            # Get API key for authenticated downloads
+            config = load_config(force_reload=True)  # Force reload to get latest API key
+            api_key = config.get("civitai", {}).get("api_key")
+            print(f"[DonutNodes Download] API key present: {bool(api_key)}, URL: {download_url[:50]}...")
+
+            # Start download with model_type for cache invalidation
+            downloader = get_downloader()
+            download_id = downloader.start_download(
+                download_url=download_url,
+                save_path=save_path,
+                api_key=api_key,
+                model_type=model_type,
+                sha256=sha256  # Pass hash to save after download
+            )
+
+            return web.json_response({
+                "downloadId": download_id,
+                "savePath": save_path,
+                "status": "started"
+            })
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.get('/donut/civitai/download/status/{download_id}')
+    async def civitai_download_status(request):
+        """Get download status."""
+        if not HAS_DOWNLOADER:
+            return web.json_response({"error": "Download module not available"}, status=500)
+
+        try:
+            download_id = request.match_info['download_id']
+            downloader = get_downloader()
+            status = downloader.get_status(download_id)
+
+            if status:
+                return web.json_response({
+                    "downloadId": status.download_id,
+                    "filename": status.filename,
+                    "filepath": status.filepath,
+                    "status": status.status,
+                    "totalSize": status.total_size,
+                    "downloadedSize": status.downloaded_size,
+                    "progress": (status.downloaded_size / status.total_size * 100) if status.total_size > 0 else 0,
+                    "speedBps": status.speed_bps,
+                    "error": status.error
+                })
+            else:
+                return web.json_response({"error": "Download not found"}, status=404)
+
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.get('/donut/civitai/downloads')
+    async def civitai_all_downloads(request):
+        """Get all download statuses."""
+        if not HAS_DOWNLOADER:
+            return web.json_response({"error": "Download module not available"}, status=500)
+
+        try:
+            downloader = get_downloader()
+            all_downloads = downloader.get_all_downloads()
+
+            downloads_list = []
+            for download_id, status in all_downloads.items():
+                downloads_list.append({
+                    "downloadId": status.download_id,
+                    "filename": status.filename,
+                    "filepath": status.filepath,
+                    "status": status.status,
+                    "totalSize": status.total_size,
+                    "downloadedSize": status.downloaded_size,
+                    "progress": (status.downloaded_size / status.total_size * 100) if status.total_size > 0 else 0,
+                    "speedBps": status.speed_bps,
+                    "error": status.error
+                })
+
+            return web.json_response({"downloads": downloads_list})
+
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.post('/donut/civitai/download/cancel/{download_id}')
+    async def civitai_cancel_download(request):
+        """Cancel a download."""
+        if not HAS_DOWNLOADER:
+            return web.json_response({"error": "Download module not available"}, status=500)
+
+        try:
+            download_id = request.match_info['download_id']
+            downloader = get_downloader()
+
+            if downloader.cancel_download(download_id):
+                return web.json_response({"status": "cancelled"})
+            else:
+                return web.json_response({"error": "Download not found or already completed"}, status=400)
+
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.get('/donut/civitai/image')
+    async def civitai_proxy_image(request):
+        """Proxy CivitAI images to avoid CORS issues."""
+        image_url = request.query.get("url", "")
+        if not image_url:
+            return web.json_response({"error": "No URL provided"}, status=400)
+
+        try:
+            headers = {
+                "User-Agent": "ComfyUI-DonutNodes/1.0"
+            }
+            req = urllib.request.Request(image_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                content_type = response.headers.get('Content-Type', 'image/jpeg')
+                data = response.read()
+                return web.Response(body=data, content_type=content_type)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.post('/donut/refresh_folder_cache')
+    async def refresh_folder_cache(request):
+        """
+        Refresh the folder_paths cache to make newly downloaded files visible.
+        This should be called after a download completes to update node dropdowns.
+        """
+        try:
+            data = await request.json()
+            folder_name = data.get("folder", None)  # Optional: specific folder to refresh
+
+            if HAS_DOWNLOADER:
+                invalidate_folder_cache(folder_name)
+
+            # Also directly clear folder_paths cache if available
+            if HAS_FOLDER_PATHS:
+                if hasattr(folder_paths, 'filename_list_cache'):
+                    if folder_name:
+                        if folder_name in folder_paths.filename_list_cache:
+                            del folder_paths.filename_list_cache[folder_name]
+                    else:
+                        folder_paths.filename_list_cache.clear()
+
+            return web.json_response({
+                "status": "ok",
+                "message": f"Cache refreshed for: {folder_name or 'all folders'}"
+            })
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.get('/donut/loras/hashes')
+    async def get_local_lora_hashes(request):
+        """
+        Get all SHA256 hashes from locally downloaded LoRAs.
+
+        Returns a set of hashes that can be used to check if a CivitAI model
+        has already been downloaded. Only returns cached hashes (fast).
+        """
+        if not HAS_FOLDER_PATHS:
+            return web.json_response({"error": "folder_paths not available"}, status=500)
+
+        if not HAS_LORA_HASH:
+            return web.json_response({"error": "lora_hash module not available"}, status=500)
+
+        try:
+            from .lora_hash import get_cached_hash
+
+            lora_paths = folder_paths.get_folder_paths("loras")
+            hashes = set()
+
+            for lora_dir in lora_paths:
+                if not os.path.exists(lora_dir):
+                    continue
+                for root, dirs, files in os.walk(lora_dir):
+                    for file in files:
+                        if file.endswith(('.safetensors', '.pt', '.ckpt')):
+                            full_path = os.path.join(root, file)
+                            cached = get_cached_hash(full_path)
+                            if cached and "SHA256" in cached:
+                                # Store full SHA256 (uppercase) for comparison with CivitAI
+                                hashes.add(cached["SHA256"].upper())
+
+            return web.json_response({
+                "hashes": list(hashes),
+                "count": len(hashes)
+            })
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.get('/donut/loras/by-hash')
+    async def get_lora_by_hash(request):
+        """
+        Find a local LoRA file by its SHA256 hash.
+        Returns the relative filename that can be used with ComfyUI nodes.
+        """
+        if not HAS_FOLDER_PATHS:
+            return web.json_response({"error": "folder_paths not available"}, status=500)
+
+        if not HAS_LORA_HASH:
+            return web.json_response({"error": "lora_hash module not available"}, status=500)
+
+        sha256 = request.query.get("sha256", "").upper()
+        if not sha256:
+            return web.json_response({"error": "No sha256 provided"}, status=400)
+
+        try:
+            from .lora_hash import get_cached_hash
+
+            lora_paths = folder_paths.get_folder_paths("loras")
+
+            for lora_dir in lora_paths:
+                if not os.path.exists(lora_dir):
+                    continue
+                for root, dirs, files in os.walk(lora_dir):
+                    for file in files:
+                        if file.endswith(('.safetensors', '.pt', '.ckpt')):
+                            full_path = os.path.join(root, file)
+                            cached = get_cached_hash(full_path)
+                            if cached and "SHA256" in cached:
+                                if cached["SHA256"].upper() == sha256:
+                                    # Found it! Return relative path
+                                    rel_path = os.path.relpath(full_path, lora_dir)
+                                    return web.json_response({
+                                        "found": True,
+                                        "filename": rel_path,
+                                        "full_path": full_path
+                                    })
+
+            return web.json_response({"found": False})
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.delete('/donut/loras/by-hash')
+    async def delete_lora_by_hash(request):
+        """
+        Delete a local LoRA file by its SHA256 hash.
+        Also removes the associated .hash cache file and cached preview images.
+        """
+        if not HAS_FOLDER_PATHS:
+            return web.json_response({"error": "folder_paths not available"}, status=500)
+
+        if not HAS_LORA_HASH:
+            return web.json_response({"error": "lora_hash module not available"}, status=500)
+
+        sha256 = request.query.get("sha256", "").upper()
+        if not sha256:
+            return web.json_response({"error": "No sha256 provided"}, status=400)
+
+        try:
+            from .lora_hash import get_cached_hash
+
+            lora_paths = folder_paths.get_folder_paths("loras")
+
+            for lora_dir in lora_paths:
+                if not os.path.exists(lora_dir):
+                    continue
+                for root, dirs, files in os.walk(lora_dir):
+                    for file in files:
+                        if file.endswith(('.safetensors', '.pt', '.ckpt')):
+                            full_path = os.path.join(root, file)
+                            cached = get_cached_hash(full_path)
+                            if cached and "SHA256" in cached:
+                                if cached["SHA256"].upper() == sha256:
+                                    # Found it! Delete the file
+                                    rel_path = os.path.relpath(full_path, lora_dir)
+                                    try:
+                                        os.remove(full_path)
+                                        # Also remove the hash cache file
+                                        hash_file = full_path + ".hash"
+                                        if os.path.exists(hash_file):
+                                            os.remove(hash_file)
+
+                                        # Delete cached preview images and metadata
+                                        hash_prefix = sha256[:10]
+                                        cache_dir = Path(__file__).parent.parent / "civitai_cache"
+                                        images_dir = cache_dir / "images"
+                                        metadata_dir = cache_dir / "metadata"
+                                        deleted_cache_files = []
+
+                                        # Delete metadata JSON
+                                        for meta_file in [metadata_dir / f"{hash_prefix}.json",
+                                                          metadata_dir / f"{sha256[:16]}.json"]:
+                                            if meta_file.exists():
+                                                meta_file.unlink()
+                                                deleted_cache_files.append(str(meta_file.name))
+
+                                        # Delete preview images (single, indexed, and collage)
+                                        if images_dir.exists():
+                                            for img_file in images_dir.glob(f"{hash_prefix}*"):
+                                                img_file.unlink()
+                                                deleted_cache_files.append(str(img_file.name))
+                                            # Also check legacy 16-char prefix
+                                            for img_file in images_dir.glob(f"{sha256[:16]}*"):
+                                                img_file.unlink()
+                                                deleted_cache_files.append(str(img_file.name))
+
+                                        # Invalidate folder cache
+                                        invalidate_folder_cache("loras")
+                                        return web.json_response({
+                                            "deleted": True,
+                                            "filename": rel_path,
+                                            "full_path": full_path,
+                                            "deleted_cache_files": deleted_cache_files
+                                        })
+                                    except OSError as e:
+                                        return web.json_response({
+                                            "error": f"Failed to delete: {e}"
+                                        }, status=500)
+
+            return web.json_response({"deleted": False, "error": "File not found"})
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.delete('/donut/loras/by-path')
+    async def delete_lora_by_path(request):
+        """
+        Delete a local LoRA file by its full path.
+        Fallback for files without cached hash.
+        """
+        if not HAS_FOLDER_PATHS:
+            return web.json_response({"error": "folder_paths not available"}, status=500)
+
+        file_path = request.query.get("path", "")
+        if not file_path:
+            return web.json_response({"error": "No path provided"}, status=400)
+
+        # Security check: ensure path is within a loras directory
+        lora_paths = folder_paths.get_folder_paths("loras")
+        is_valid_path = False
+        for lora_dir in lora_paths:
+            if file_path.startswith(os.path.abspath(lora_dir)):
+                is_valid_path = True
+                break
+
+        if not is_valid_path:
+            return web.json_response({"error": "Invalid path - not in loras directory"}, status=403)
+
+        if not os.path.exists(file_path):
+            return web.json_response({"error": "File not found"}, status=404)
+
+        try:
+            filename = os.path.basename(file_path)
+            os.remove(file_path)
+
+            # Also remove the hash cache file if it exists
+            hash_file = file_path + ".hash"
+            if os.path.exists(hash_file):
+                os.remove(hash_file)
+
+            # Invalidate folder cache
+            invalidate_folder_cache("loras")
+
+            return web.json_response({
+                "deleted": True,
+                "filename": filename,
+                "full_path": file_path
+            })
+        except OSError as e:
+            return web.json_response({"error": f"Failed to delete: {e}"}, status=500)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.get('/donut/loras/filename')
+    async def get_lora_filename(request):
+        """
+        Get the relative filename for a LoRA given its full path.
+        Used by frontend to set node widget values after download.
+        """
+        if not HAS_FOLDER_PATHS:
+            return web.json_response({"error": "folder_paths not available"}, status=500)
+
+        full_path = request.query.get("path", "")
+        if not full_path:
+            return web.json_response({"error": "No path provided"}, status=400)
+
+        try:
+            # Find the relative path from the loras folder
+            lora_paths = folder_paths.get_folder_paths("loras")
+
+            for lora_dir in lora_paths:
+                if full_path.startswith(lora_dir):
+                    rel_path = os.path.relpath(full_path, lora_dir)
+                    return web.json_response({
+                        "filename": rel_path,
+                        "full_path": full_path
+                    })
+
+            # If not in any lora path, just return the basename
+            return web.json_response({
+                "filename": os.path.basename(full_path),
+                "full_path": full_path
+            })
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 

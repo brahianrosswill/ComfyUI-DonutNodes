@@ -140,6 +140,11 @@ class DonutLoRAStack:
                                 if info.trained_words:
                                     slot_info += f"\nTriggers: {', '.join(info.trained_words)}"
                                 slot_info += f"\n{info.model_url}"
+                                # Add description at the end (strip HTML tags)
+                                if info.description:
+                                    desc = re.sub(r'<[^>]+>', '', info.description).strip()
+                                    if desc:
+                                        slot_info += f"\n\n{desc}"
                                 individual_infos[slot_idx] = slot_info
 
                                 # Create collage for this LoRA
