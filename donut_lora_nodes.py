@@ -142,7 +142,8 @@ ZIT_PRESETS = {
 # Build flat list for ComfyUI (used when model_type is Auto)
 def build_preset_list(model_type=None):
     """Build preset list, optionally filtered by model type."""
-    presets = ["None"]
+    # Include empty string for backwards compatibility with cached workflows
+    presets = ["None", ""]
 
     if model_type is None or model_type == "Auto":
         # Show all presets with prefixes
@@ -229,6 +230,27 @@ class DonutLoRAStack:
         lora_stack=None
     ):
         stack = list(lora_stack) if lora_stack else []
+
+        # Handle empty string values from cached workflows (backwards compatibility)
+        def safe_float(val, default=1.0):
+            if val == "" or val is None:
+                return default
+            return float(val)
+
+        def safe_preset(val):
+            if val == "" or val is None:
+                return "None"
+            return val
+
+        model_weight_1 = safe_float(model_weight_1, 1.0)
+        clip_weight_1 = safe_float(clip_weight_1, 1.0)
+        block_preset_1 = safe_preset(block_preset_1)
+        model_weight_2 = safe_float(model_weight_2, 1.0)
+        clip_weight_2 = safe_float(clip_weight_2, 1.0)
+        block_preset_2 = safe_preset(block_preset_2)
+        model_weight_3 = safe_float(model_weight_3, 1.0)
+        clip_weight_3 = safe_float(clip_weight_3, 1.0)
+        block_preset_3 = safe_preset(block_preset_3)
 
         def get_preset_vector(preset):
             """Extract vector from preset format 'NAME:vector'"""
