@@ -218,6 +218,9 @@ def register_routes():
                                         lora_data["civitai_version"] = info.version_name
                                         lora_data["base_model"] = info.base_model
                                         lora_data["has_preview"] = True
+                                        # Add model/version IDs for update checking
+                                        lora_data["model_id"] = info.model_id
+                                        lora_data["version_id"] = info.model_version_id
                                     else:
                                         lora_data["has_preview"] = False
                                 else:
@@ -454,6 +457,85 @@ def register_routes():
         except ValueError:
             return web.json_response({"error": "Invalid model ID"}, status=400)
         except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.post('/donut/civitai/check-updates')
+    async def civitai_check_updates(request):
+        """Check if local models have updates available on CivitAI.
+
+        Accepts a list of {model_id, sha256} pairs and returns
+        which ones have newer versions available (by comparing SHA256 hashes).
+
+        Also accepts an optional all_local_hashes list to check if the latest
+        version is already downloaded under a different filename.
+        """
+        if not HAS_CIVITAI:
+            return web.json_response({"error": "CivitAI module not available"}, status=500)
+
+        try:
+            data = await request.json()
+            models_to_check = data.get("models", [])
+            # Set of ALL local hashes - to check if we already have the latest version
+            all_local_hashes = set(h.upper() for h in data.get("all_local_hashes", []))
+
+            if not models_to_check:
+                return web.json_response({"updates": []})
+
+            # Get API key from config
+            config = load_config()
+            api_key = config.get("civitai", {}).get("api_key")
+
+            updates = []
+
+            # Check each model (rate-limited by get_model_by_id)
+            for item in models_to_check:
+                model_id = item.get("model_id")
+                local_sha256 = item.get("sha256", "").upper()
+
+                if not model_id or not local_sha256:
+                    continue
+
+                try:
+                    # Fetch current model info from CivitAI
+                    model_data = get_model_by_id(model_id, api_key=api_key)
+
+                    if model_data and model_data.get("modelVersions"):
+                        # First version is the latest
+                        latest_version = model_data["modelVersions"][0]
+                        latest_files = latest_version.get("files", [])
+
+                        if latest_files:
+                            latest_sha256 = latest_files[0].get("hashes", {}).get("SHA256", "").upper()
+
+                            # Check if we already have the latest version downloaded
+                            # (either this file or any other local file)
+                            already_have_latest = (
+                                latest_sha256 == local_sha256 or
+                                latest_sha256 in all_local_hashes
+                            )
+
+                            # Only report update if we don't have the latest anywhere
+                            if latest_sha256 and not already_have_latest:
+                                updates.append({
+                                    "model_id": model_id,
+                                    "model_name": model_data.get("name", "Unknown"),
+                                    "local_sha256": local_sha256,
+                                    "latest_sha256": latest_sha256,
+                                    "latest_version_name": latest_version.get("name", ""),
+                                    "latest_version_id": latest_version.get("id"),
+                                    "latest_base_model": latest_version.get("baseModel", ""),
+                                    "latest_download_url": latest_version.get("downloadUrl", ""),
+                                    "latest_filename": latest_files[0].get("name", "")
+                                })
+                except Exception as e:
+                    print(f"[CivitAI] Error checking updates for model {model_id}: {e}")
+                    continue
+
+            return web.json_response({"updates": updates})
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             return web.json_response({"error": str(e)}, status=500)
 
     @routes.post('/donut/civitai/download')

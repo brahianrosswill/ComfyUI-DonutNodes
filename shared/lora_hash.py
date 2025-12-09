@@ -152,6 +152,15 @@ def compute_hash_for_civitai(file_path: str, prefer_fast: bool = True) -> Tuple[
     return ("SHA256", compute_sha256(file_path))
 
 
+def _get_cache_filename(file_path: str) -> str:
+    """Generate a unique cache filename from a file path."""
+    import hashlib
+    # Use hash of full path to avoid collisions from same-named files in different dirs
+    path_hash = hashlib.md5(file_path.encode()).hexdigest()[:12]
+    stem = Path(file_path).stem[:30]  # Truncate long filenames
+    return f"{stem}_{path_hash}.hash"
+
+
 def get_cached_hash(file_path: str, cache_dir: Optional[str] = None) -> Optional[Dict[str, str]]:
     """
     Check if we have cached hashes for this file.
@@ -171,7 +180,7 @@ def get_cached_hash(file_path: str, cache_dir: Optional[str] = None) -> Optional
     if cache_dir is None:
         cache_file = Path(file_path).with_suffix(Path(file_path).suffix + ".hash")
     else:
-        cache_file = Path(cache_dir) / (Path(file_path).stem + ".hash")
+        cache_file = Path(cache_dir) / _get_cache_filename(file_path)
 
     if not cache_file.exists():
         return None
@@ -208,7 +217,7 @@ def save_hash_cache(file_path: str, hashes: Dict[str, str], cache_dir: Optional[
         cache_file = Path(file_path).with_suffix(Path(file_path).suffix + ".hash")
     else:
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
-        cache_file = Path(cache_dir) / (Path(file_path).stem + ".hash")
+        cache_file = Path(cache_dir) / _get_cache_filename(file_path)
 
     try:
         cache_data = {

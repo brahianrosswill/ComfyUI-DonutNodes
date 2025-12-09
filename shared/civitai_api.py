@@ -37,7 +37,8 @@ CIVITAI_API_BASE = "https://civitai.com/api/v1"
 CIVITAI_HASH_ENDPOINT = f"{CIVITAI_API_BASE}/model-versions/by-hash"
 
 # Rate limiting - CivitAI recommends not hammering the API
-MIN_REQUEST_INTERVAL = 1.0  # seconds between requests
+# 0.2s is reasonable - allows 5 requests/second which is within limits
+MIN_REQUEST_INTERVAL = 0.2  # seconds between requests
 _last_request_time = 0.0
 
 
@@ -343,15 +344,21 @@ def search_models(
         "period": period,
     }
 
-    # CivitAI API supports both cursor and page-based pagination
-    # Cursor is preferred for reliable pagination
-    if cursor:
-        params["cursor"] = cursor
-    else:
-        params["page"] = max(1, page)
-
+    # CivitAI API pagination rules (as of late 2024):
+    # - When using a search query, MUST use cursor-based pagination (page param not allowed)
+    # - When browsing without query, can use either page or cursor
     if query:
         params["query"] = query
+        # With a query, only use cursor (not page) - CivitAI returns 400 otherwise
+        if cursor:
+            params["cursor"] = cursor
+        # Don't add page param when there's a query - first page is implicit
+    else:
+        # No query - can use page-based pagination
+        if cursor:
+            params["cursor"] = cursor
+        else:
+            params["page"] = max(1, page)
 
     # CivitAI API: nsfw=true shows NSFW content, nsfw=false or omitted shows SFW only
     # We explicitly set it either way for clarity

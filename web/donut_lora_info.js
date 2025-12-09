@@ -123,32 +123,80 @@ app.registerExtension({
                     onNodeCreated.apply(this, arguments);
                 }
 
-                // Find the block_preset widget and add callback
-                const presetWidget = this.widgets?.find(w => w.name === "block_preset");
-                if (presetWidget) {
-                    const originalCallback = presetWidget.callback;
-                    const node = this;
+                // Store all presets for filtering
+                const node = this;
+                const allPresets = {};
+                for (let i = 1; i <= 3; i++) {
+                    const presetWidget = this.widgets?.find(w => w.name === `block_preset_${i}`);
+                    if (presetWidget && presetWidget.options?.values) {
+                        allPresets[i] = [...presetWidget.options.values];
+                    }
+                }
 
-                    presetWidget.callback = function(value) {
-                        // Call original callback if exists
-                        if (originalCallback) {
-                            originalCallback.call(this, value);
-                        }
-
-                        // Extract the vector part after ':' (Inspire-style format)
-                        // Format is "NAME:vector" e.g. "SDXL-ALL:1,1,1,1,1,1,1,1,1,1,1,1,1"
-                        if (value && value !== "None" && value.includes(":")) {
-                            const presetVector = value.split(":")[1];
-                            for (const w of node.widgets) {
-                                if (w.name === "block_vector_1" ||
-                                    w.name === "block_vector_2" ||
-                                    w.name === "block_vector_3") {
-                                    w.value = presetVector;
-                                }
+                // Function to filter presets by model type
+                const filterPresets = (modelType) => {
+                    for (let i = 1; i <= 3; i++) {
+                        const presetWidget = node.widgets?.find(w => w.name === `block_preset_${i}`);
+                        if (presetWidget && allPresets[i]) {
+                            let filtered;
+                            if (modelType === "Auto") {
+                                filtered = allPresets[i];
+                            } else {
+                                // Filter to only show presets matching the model type prefix
+                                filtered = allPresets[i].filter(p =>
+                                    p === "None" || p.startsWith(modelType + "-")
+                                );
                             }
-                            node.setDirtyCanvas(true);
+                            presetWidget.options.values = filtered;
+
+                            // Reset to None if current value is not in filtered list
+                            if (!filtered.includes(presetWidget.value)) {
+                                presetWidget.value = "None";
+                            }
                         }
+                    }
+                    node.setDirtyCanvas(true);
+                };
+
+                // Add callback to model_type widget
+                const modelTypeWidget = this.widgets?.find(w => w.name === "model_type");
+                if (modelTypeWidget) {
+                    const originalModelTypeCallback = modelTypeWidget.callback;
+                    modelTypeWidget.callback = function(value) {
+                        if (originalModelTypeCallback) {
+                            originalModelTypeCallback.call(this, value);
+                        }
+                        filterPresets(value);
                     };
+                    // Apply initial filter
+                    filterPresets(modelTypeWidget.value || "Auto");
+                }
+
+                // Find the block_preset widgets and add callbacks to update corresponding block_vector
+                for (let i = 1; i <= 3; i++) {
+                    const presetWidget = this.widgets?.find(w => w.name === `block_preset_${i}`);
+                    if (presetWidget) {
+                        const originalCallback = presetWidget.callback;
+                        const slotNum = i;
+
+                        presetWidget.callback = function(value) {
+                            // Call original callback if exists
+                            if (originalCallback) {
+                                originalCallback.call(this, value);
+                            }
+
+                            // Extract the vector part after ':' (Inspire-style format)
+                            // Format is "NAME:vector" e.g. "SDXL-ALL:1,1,1,1,1,1,1,1,1,1,1,1,1"
+                            if (value && value !== "None" && value.includes(":")) {
+                                const presetVector = value.split(":")[1];
+                                const vectorWidget = node.widgets?.find(w => w.name === `block_vector_${slotNum}`);
+                                if (vectorWidget) {
+                                    vectorWidget.value = presetVector;
+                                }
+                                node.setDirtyCanvas(true);
+                            }
+                        };
+                    }
                 }
 
                 // Create combined info+image widgets for each LoRA slot (side by side)
@@ -209,8 +257,8 @@ app.registerExtension({
                     widgetsByName[w.name] = w;
                 }
 
-                // Add block_preset and civitai_lookup first
-                if (widgetsByName["block_preset"]) reorderedWidgets.push(widgetsByName["block_preset"]);
+                // Add model_type and civitai_lookup first
+                if (widgetsByName["model_type"]) reorderedWidgets.push(widgetsByName["model_type"]);
                 if (widgetsByName["civitai_lookup"]) reorderedWidgets.push(widgetsByName["civitai_lookup"]);
 
                 // Add each LoRA group: config widgets, then combined info+image panel
@@ -220,6 +268,7 @@ app.registerExtension({
                         `lora_name_${i}`,
                         `model_weight_${i}`,
                         `clip_weight_${i}`,
+                        `block_preset_${i}`,
                         `block_vector_${i}`,
                         `civitai_panel_${i}`
                     ];

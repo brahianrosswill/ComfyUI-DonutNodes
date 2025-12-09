@@ -42,8 +42,13 @@ class DonutCivitaiBrowser {
             baseModels: [],
             tag: "",
             username: "",
-            downloadedOnly: false  // Show only locally downloaded models
+            downloadedOnly: false,  // Show only locally downloaded models
+            updatesOnly: false      // Show only models with updates available
         };
+
+        // Cache for models with updates available (populated by checkForUpdates)
+        this.modelsWithUpdates = new Map();  // model_id -> update info
+        this.isCheckingUpdates = false;
 
         // Endless scroll setting
         this.endlessScroll = this.loadEndlessScrollSetting();
@@ -162,6 +167,9 @@ class DonutCivitaiBrowser {
         // Set of local SHA256 hashes for checking downloaded status
         this.localHashes = new Set();
         this.localHashesLoaded = false;
+
+        // Saved scroll position for returning from detail view
+        this.savedScrollPosition = 0;
     }
 
     async checkApiKey() {
@@ -646,6 +654,20 @@ class DonutCivitaiBrowser {
             return;
         }
 
+        // Check if the query is a CivitAI URL - if so, load model directly
+        const civitaiUrl = this.parseCivitaiUrl(this.filters.query);
+        if (civitaiUrl) {
+            console.log(`[CivitAI Browser] Detected CivitAI URL, loading model ${civitaiUrl.modelId}`);
+            // Clear the search box and load the model details
+            this.filters.query = "";
+            const searchInput = this.dialog?.querySelector("#donut-civitai-search");
+            if (searchInput) searchInput.value = "";
+            this.saveFilters();
+            // Load model details, optionally selecting a specific version
+            this.loadModelDetails(civitaiUrl.modelId, civitaiUrl.versionId);
+            return;
+        }
+
         this.isLoading = true;
         this.pendingSearch = false;
         this.updateLoadingState();
@@ -777,6 +799,14 @@ class DonutCivitaiBrowser {
                     if (!matchesBase) continue;
                 }
 
+                // Check if this model has an update available
+                const updateInfo = lora.model_id ? this.modelsWithUpdates.get(lora.model_id) : null;
+
+                // Apply updates filter
+                if (this.filters.updatesOnly && !updateInfo) {
+                    continue;
+                }
+
                 // Create a CivitAI-like model object for display
                 // Use first 10 chars of hash for preview URL (matches cache format)
                 const hashPrefix = lora.hash ? lora.hash.substring(0, 10) : null;
@@ -804,7 +834,11 @@ class DonutCivitaiBrowser {
                     // Extra data for local items
                     _isLocal: true,
                     _localPath: lora.full_path,
-                    _relativePath: lora.name
+                    _relativePath: lora.name,
+                    _modelId: lora.model_id,
+                    // Update info if available
+                    _hasUpdate: !!updateInfo,
+                    _updateInfo: updateInfo
                 });
             }
 
@@ -822,14 +856,52 @@ class DonutCivitaiBrowser {
         }
     }
 
-    async loadModelDetails(modelId) {
+    /**
+     * Parse a CivitAI URL to extract model ID and optional version ID
+     * Supports formats like:
+     *   https://civitai.com/models/2201058/model-name
+     *   https://civitai.com/models/2201058/model-name?modelVersionId=2483834
+     *   https://civitai.com/models/2201058?modelVersionId=2483834
+     * @returns {object|null} { modelId, versionId } or null if not a CivitAI URL
+     */
+    parseCivitaiUrl(text) {
+        if (!text) return null;
+
+        // Match civitai.com/models/{id} pattern
+        const urlPattern = /civitai\.com\/models\/(\d+)/i;
+        const match = text.match(urlPattern);
+
+        if (!match) return null;
+
+        const modelId = parseInt(match[1], 10);
+        let versionId = null;
+
+        // Try to extract modelVersionId from query params
+        const versionPattern = /modelVersionId=(\d+)/i;
+        const versionMatch = text.match(versionPattern);
+        if (versionMatch) {
+            versionId = parseInt(versionMatch[1], 10);
+        }
+
+        return { modelId, versionId };
+    }
+
+    async loadModelDetails(modelId, preselectedVersionId = null) {
         this.isLoading = true;
         this.updateLoadingState();
+
+        // Save scroll position before navigating to detail view
+        const content = this.dialog?.querySelector("#donut-civitai-content");
+        if (content) {
+            this.savedScrollPosition = content.scrollTop;
+        }
 
         try {
             const response = await api.fetchApi(`/donut/civitai/model/${modelId}`);
             if (response.ok) {
                 this.currentModel = await response.json();
+                // Store the preselected version ID for renderDetailView to use
+                this.currentModel._preselectedVersionId = preselectedVersionId;
                 this.currentView = "detail";
                 this.renderDetailView();
             }
@@ -1407,6 +1479,140 @@ class DonutCivitaiBrowser {
         }
     }
 
+    async checkForUpdates() {
+        // Check CivitAI for newer versions of downloaded models
+        if (this.isCheckingUpdates) {
+            // Already checking - abort
+            this.checkUpdatesAborted = true;
+            return;
+        }
+
+        // Get list of all local LoRAs with metadata
+        let allLoras;
+        try {
+            const response = await api.fetchApi("/donut/loras/list?include_meta=true");
+            if (response.ok) {
+                const data = await response.json();
+                allLoras = data.loras || [];
+            } else {
+                this.showNotification("Error", "Failed to load LoRA list", 3000);
+                return;
+            }
+        } catch (error) {
+            console.error("[CivitAI Browser] Error loading LoRA list:", error);
+            this.showNotification("Error", "Failed to load LoRA list", 3000);
+            return;
+        }
+
+        // Filter to LoRAs that have model_id (from CivitAI)
+        const lorasToCheck = allLoras.filter(l => l.model_id && l.sha256);
+
+        if (lorasToCheck.length === 0) {
+            this.showNotification("No models to check", "No LoRAs with CivitAI info found. Try 'Fetch Missing Info' first.", 4000);
+            return;
+        }
+
+        // Collect ALL local hashes - used to check if we already have a newer version
+        // under a different filename (e.g., lora_v2.safetensors)
+        const allLocalHashes = allLoras
+            .filter(l => l.sha256)
+            .map(l => l.sha256);
+
+        this.isCheckingUpdates = true;
+        this.checkUpdatesAborted = false;
+
+        // Update button to show checking state
+        const checkBtn = this.dialog?.querySelector("#donut-civitai-check-updates");
+        if (checkBtn) {
+            checkBtn.textContent = "Checking...";
+            checkBtn.style.background = "#5a4a2a";
+        }
+
+        // Clear previous results
+        this.modelsWithUpdates.clear();
+
+        // Process in batches to avoid rate limiting (5 models per request is reasonable)
+        const BATCH_SIZE = 5;
+        const DELAY_MS = 1500;  // 1.5 seconds between batches for rate limiting
+        let checked = 0;
+        let updatesFound = 0;
+
+        for (let i = 0; i < lorasToCheck.length; i += BATCH_SIZE) {
+            if (this.checkUpdatesAborted) {
+                break;
+            }
+
+            const batch = lorasToCheck.slice(i, i + BATCH_SIZE);
+
+            // Update button to show progress
+            if (checkBtn) {
+                checkBtn.textContent = `Checking (${Math.min(i + BATCH_SIZE, lorasToCheck.length)}/${lorasToCheck.length})`;
+            }
+
+            try {
+                const response = await api.fetchApi("/donut/civitai/check-updates", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        models: batch.map(l => ({
+                            model_id: l.model_id,
+                            sha256: l.sha256
+                        })),
+                        // Send all local hashes so server can check if we already have the latest
+                        all_local_hashes: allLocalHashes
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    const updates = data.updates || [];
+
+                    for (const update of updates) {
+                        this.modelsWithUpdates.set(update.model_id, update);
+                        updatesFound++;
+                    }
+                }
+            } catch (error) {
+                console.error("[CivitAI Browser] Error checking updates:", error);
+            }
+
+            checked += batch.length;
+
+            // Rate limiting delay between batches
+            if (!this.checkUpdatesAborted && i + BATCH_SIZE < lorasToCheck.length) {
+                await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            }
+        }
+
+        this.isCheckingUpdates = false;
+
+        // Reset button
+        if (checkBtn) {
+            checkBtn.textContent = "Check for Updates";
+            checkBtn.style.background = "#4a3a2a";
+        }
+
+        // Show results
+        if (this.checkUpdatesAborted) {
+            this.showNotification("Stopped", `Found ${updatesFound} updates (checked ${checked}/${lorasToCheck.length})`, 5000);
+        } else {
+            this.showNotification("Check Complete", `Found ${updatesFound} LoRAs with updates available`, 5000);
+        }
+
+        this.checkUpdatesAborted = false;
+
+        // Enable the updates filter checkbox if updates found
+        const updatesCheckbox = this.dialog?.querySelector("#donut-civitai-updates-checkbox");
+        if (updatesCheckbox && updatesFound > 0) {
+            updatesCheckbox.disabled = false;
+        }
+
+        // If in downloaded-only mode, refresh the search to show update badges
+        if (this.filters.downloadedOnly) {
+            this.search();
+        }
+    }
+
     showNotification(title, message, duration = 5000) {
         // Create toast notification
         const toast = document.createElement("div");
@@ -1613,7 +1819,7 @@ class DonutCivitaiBrowser {
             if (e.key === "Escape") {
                 if (this.currentView === "detail") {
                     this.currentView = "grid";
-                    this.renderGrid();
+                    this.renderGrid(true);  // Restore scroll position
                 } else {
                     this.close();
                 }
@@ -1659,6 +1865,7 @@ class DonutCivitaiBrowser {
             width: 100%;
             padding: 10px 15px;
             padding-left: 40px;
+            padding-right: 35px;
             background: #0d0d1a;
             border: 1px solid #333;
             border-radius: 8px;
@@ -1666,8 +1873,38 @@ class DonutCivitaiBrowser {
             font-size: 14px;
             box-sizing: border-box;
         `;
+
+        // Clear button
+        const clearBtn = document.createElement("span");
+        clearBtn.innerHTML = "×";
+        clearBtn.id = "donut-civitai-search-clear";
+        clearBtn.style.cssText = `
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #666;
+            font-size: 20px;
+            cursor: pointer;
+            display: ${this.filters.query ? 'block' : 'none'};
+            line-height: 1;
+            padding: 2px 6px;
+            border-radius: 50%;
+        `;
+        clearBtn.onmouseover = () => { clearBtn.style.color = '#fff'; clearBtn.style.background = '#444'; };
+        clearBtn.onmouseout = () => { clearBtn.style.color = '#666'; clearBtn.style.background = 'transparent'; };
+        clearBtn.onclick = () => {
+            searchInput.value = "";
+            this.filters.query = "";
+            clearBtn.style.display = "none";
+            this.resetPagination();
+            this.search();
+            searchInput.focus();
+        };
+
         searchInput.oninput = (e) => {
             this.filters.query = e.target.value;
+            clearBtn.style.display = e.target.value ? "block" : "none";
             clearTimeout(this.searchTimeout);
             this.searchTimeout = setTimeout(() => {
                 this.resetPagination();
@@ -1693,10 +1930,12 @@ class DonutCivitaiBrowser {
             transform: translateY(-50%);
             color: #666;
             font-size: 16px;
+            pointer-events: none;
         `;
 
         searchContainer.appendChild(searchIcon);
         searchContainer.appendChild(searchInput);
+        searchContainer.appendChild(clearBtn);
         header.appendChild(searchContainer);
 
         // Refresh button
@@ -1830,6 +2069,61 @@ class DonutCivitaiBrowser {
 
         togglesContainer.appendChild(downloadedContainer);
 
+        // Updates Available toggle (sub-option of Downloaded only)
+        const updatesContainer = document.createElement("div");
+        updatesContainer.style.cssText = "margin-bottom: 8px; margin-left: 20px;";
+
+        const updatesLabel = document.createElement("label");
+        updatesLabel.style.cssText = "display: flex; align-items: center; gap: 8px; cursor: pointer; color: #f8a; font-size: 13px; font-weight: 500;";
+
+        const updatesCheckbox = document.createElement("input");
+        updatesCheckbox.type = "checkbox";
+        updatesCheckbox.id = "donut-civitai-updates-checkbox";
+        updatesCheckbox.checked = this.filters.updatesOnly || false;
+        updatesCheckbox.disabled = !this.filters.downloadedOnly;
+        updatesCheckbox.onchange = (e) => {
+            this.filters.updatesOnly = e.target.checked;
+            this.resetPagination();
+            this.search();
+        };
+
+        updatesLabel.appendChild(updatesCheckbox);
+        updatesLabel.appendChild(document.createTextNode("Updates available"));
+        updatesContainer.appendChild(updatesLabel);
+
+        // Check Updates button
+        const checkUpdatesBtn = document.createElement("button");
+        checkUpdatesBtn.id = "donut-civitai-check-updates";
+        checkUpdatesBtn.textContent = "Check for Updates";
+        checkUpdatesBtn.title = "Check CivitAI for newer versions of your downloaded LoRAs";
+        checkUpdatesBtn.style.cssText = `
+            width: 100%;
+            margin-top: 6px;
+            padding: 6px 10px;
+            background: #4a3a2a;
+            border: 1px solid #6a4a3a;
+            border-radius: 4px;
+            color: #f8a;
+            font-size: 11px;
+            cursor: pointer;
+        `;
+        checkUpdatesBtn.onclick = () => this.checkForUpdates();
+        updatesContainer.appendChild(checkUpdatesBtn);
+
+        togglesContainer.appendChild(updatesContainer);
+
+        // Update downloadedOnly checkbox to enable/disable updates checkbox
+        downloadedCheckbox.onchange = (e) => {
+            this.filters.downloadedOnly = e.target.checked;
+            updatesCheckbox.disabled = !e.target.checked;
+            if (!e.target.checked) {
+                this.filters.updatesOnly = false;
+                updatesCheckbox.checked = false;
+            }
+            this.resetPagination();
+            this.search();
+        };
+
         // NSFW toggle
         const nsfwContainer = document.createElement("div");
         nsfwContainer.style.cssText = "margin-bottom: 8px;";
@@ -1908,19 +2202,19 @@ class DonutCivitaiBrowser {
             this.filters.tag = value;
             this.resetPagination();
             this.search();
-        }));
+        }, "donut-civitai-tag-filter"));
 
         // Creator/Username filter input
         sidebar.appendChild(this.createTextFilter("Creator", this.filters.username, "Username", (value) => {
             this.filters.username = value;
             this.resetPagination();
             this.search();
-        }));
+        }, "donut-civitai-creator-filter"));
 
         return sidebar;
     }
 
-    createTextFilter(title, value, placeholder, onChange) {
+    createTextFilter(title, value, placeholder, onChange, inputId = null) {
         const section = document.createElement("div");
         section.style.cssText = "margin-top: 15px; padding-top: 15px; border-top: 1px solid #333;";
 
@@ -1929,13 +2223,19 @@ class DonutCivitaiBrowser {
         header.style.cssText = "font-size: 12px; font-weight: 600; color: #888; text-transform: uppercase; margin-bottom: 8px;";
         section.appendChild(header);
 
+        // Container for input and clear button
+        const inputContainer = document.createElement("div");
+        inputContainer.style.cssText = "position: relative;";
+
         const input = document.createElement("input");
         input.type = "text";
+        if (inputId) input.id = inputId;
         input.value = value;
         input.placeholder = placeholder;
         input.style.cssText = `
             width: 100%;
             padding: 8px 10px;
+            padding-right: 28px;
             background: #0d0d1a;
             border: 1px solid #333;
             border-radius: 6px;
@@ -1944,8 +2244,34 @@ class DonutCivitaiBrowser {
             box-sizing: border-box;
         `;
 
+        // Clear button
+        const clearBtn = document.createElement("span");
+        clearBtn.innerHTML = "×";
+        clearBtn.style.cssText = `
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #666;
+            font-size: 16px;
+            cursor: pointer;
+            display: ${value ? 'block' : 'none'};
+            line-height: 1;
+            padding: 2px 4px;
+            border-radius: 50%;
+        `;
+        clearBtn.onmouseover = () => { clearBtn.style.color = '#fff'; clearBtn.style.background = '#444'; };
+        clearBtn.onmouseout = () => { clearBtn.style.color = '#666'; clearBtn.style.background = 'transparent'; };
+        clearBtn.onclick = () => {
+            input.value = "";
+            clearBtn.style.display = "none";
+            onChange("");
+            input.focus();
+        };
+
         let debounceTimer;
         input.oninput = (e) => {
+            clearBtn.style.display = e.target.value ? "block" : "none";
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => onChange(e.target.value), 500);
         };
@@ -1957,7 +2283,9 @@ class DonutCivitaiBrowser {
             e.stopPropagation();
         };
 
-        section.appendChild(input);
+        inputContainer.appendChild(input);
+        inputContainer.appendChild(clearBtn);
+        section.appendChild(inputContainer);
         return section;
     }
 
@@ -2155,12 +2483,11 @@ class DonutCivitaiBrowser {
         }
     }
 
-    renderGrid() {
+    renderGrid(restoreScroll = false) {
         const content = this.dialog?.querySelector("#donut-civitai-content");
         if (!content) return;
 
         content.innerHTML = "";
-        content.scrollTop = 0;  // Scroll to top when rendering new results
         this.currentView = "grid";
 
         if (this.searchResults.length === 0) {
@@ -2174,40 +2501,16 @@ class DonutCivitaiBrowser {
             return;
         }
 
-        // Grid container - use flexbox for endless scroll (stable order), columns for pagination (masonry)
+        // Grid container - flexbox for stable item positions during endless scroll
         const grid = document.createElement("div");
         grid.id = "donut-civitai-grid";
 
-        const style = document.createElement("style");
-
-        if (this.endlessScroll) {
-            // Flexbox grid - items stay in order when new ones are added
-            grid.style.cssText = `
-                display: flex;
-                flex-wrap: wrap;
-                gap: 16px;
-            `;
-            // Responsive card widths for flex layout
-            style.textContent = `
-                #donut-civitai-grid > div { width: calc(25% - 12px); box-sizing: border-box; }
-                @media (max-width: 1400px) { #donut-civitai-grid > div { width: calc(33.333% - 11px); } }
-                @media (max-width: 1100px) { #donut-civitai-grid > div { width: calc(50% - 8px); } }
-                @media (max-width: 800px) { #donut-civitai-grid > div { width: 100%; } }
-            `;
-        } else {
-            // CSS columns for masonry layout (only for pagination mode)
-            grid.style.cssText = `
-                column-count: 4;
-                column-gap: 16px;
-            `;
-            style.textContent = `
-                @media (max-width: 1400px) { #donut-civitai-grid { column-count: 3; } }
-                @media (max-width: 1100px) { #donut-civitai-grid { column-count: 2; } }
-                @media (max-width: 800px) { #donut-civitai-grid { column-count: 1; } }
-            `;
-        }
-
-        content.appendChild(style);
+        grid.style.cssText = `
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            align-items: flex-start;
+        `;
 
         for (const model of this.searchResults) {
             grid.appendChild(this.createModelCard(model));
@@ -2226,10 +2529,21 @@ class DonutCivitaiBrowser {
                 content.appendChild(this.createPagination());
             }
         }
+
+        // Restore scroll position if returning from detail view, otherwise scroll to top
+        if (restoreScroll && this.savedScrollPosition > 0) {
+            // Use requestAnimationFrame to ensure DOM is fully rendered before scrolling
+            requestAnimationFrame(() => {
+                content.scrollTop = this.savedScrollPosition;
+            });
+        } else {
+            content.scrollTop = 0;
+        }
     }
 
     createModelCard(model) {
         const card = document.createElement("div");
+        card.className = "donut-civitai-card";
         card.style.cssText = `
             background: #0d0d1a;
             border-radius: 10px;
@@ -2237,8 +2551,9 @@ class DonutCivitaiBrowser {
             cursor: pointer;
             transition: transform 0.2s, box-shadow 0.2s;
             border: 2px solid transparent;
-            break-inside: avoid;
-            margin-bottom: 16px;
+            width: calc(25% - 12px);
+            min-width: 200px;
+            box-sizing: border-box;
         `;
 
         card.onmouseenter = () => {
@@ -2331,16 +2646,19 @@ class DonutCivitaiBrowser {
         const info = document.createElement("div");
         info.style.cssText = "padding: 12px;";
 
-        // Title
+        // Title - allow up to 3 lines
         const title = document.createElement("div");
         title.textContent = model.name || "Unknown";
         title.style.cssText = `
             font-size: 14px;
             font-weight: 600;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
             margin-bottom: 8px;
+            line-height: 1.3;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            word-break: break-word;
         `;
         title.title = model.name;
         info.appendChild(title);
@@ -2374,6 +2692,29 @@ class DonutCivitaiBrowser {
                 border-radius: 4px;
             `;
             meta.appendChild(downloadedBadge);
+        }
+
+        // Update Available badge - for local items with updates
+        if (model._hasUpdate) {
+            const updateBadge = document.createElement("span");
+            updateBadge.textContent = "⬆ Update";
+            updateBadge.title = `New version: ${model._updateInfo?.latest_version_name || 'Unknown'}`;
+            updateBadge.style.cssText = `
+                font-size: 10px;
+                background: #4a3a2a;
+                color: #f8a;
+                padding: 2px 6px;
+                border-radius: 4px;
+                cursor: pointer;
+            `;
+            // Click to view update details
+            updateBadge.onclick = (e) => {
+                e.stopPropagation();
+                if (model._modelId) {
+                    this.loadModelDetails(model._modelId);
+                }
+            };
+            meta.appendChild(updateBadge);
         }
 
         // Base model badge
@@ -2636,7 +2977,7 @@ class DonutCivitaiBrowser {
         `;
         backBtn.onclick = () => {
             this.currentView = "grid";
-            this.renderGrid();
+            this.renderGrid(true);  // Restore scroll position
         };
         content.appendChild(backBtn);
 
@@ -2661,7 +3002,16 @@ class DonutCivitaiBrowser {
             align-items: center;
         `;
 
-        const version = model.modelVersions?.[0];
+        // Find the initial version to display (may be preselected from URL)
+        let initialVersionIndex = 0;
+        if (model._preselectedVersionId && model.modelVersions?.length) {
+            const foundIndex = model.modelVersions.findIndex(v => v.id === model._preselectedVersionId);
+            if (foundIndex >= 0) {
+                initialVersionIndex = foundIndex;
+                console.log(`[CivitAI Browser] Preselected version ${model._preselectedVersionId} found at index ${foundIndex}`);
+            }
+        }
+        const version = model.modelVersions?.[initialVersionIndex];
         const mainImage = version?.images?.[0];
         if (mainImage?.url) {
             if (mainImage.type === "video") {
@@ -2756,8 +3106,36 @@ class DonutCivitaiBrowser {
         // Creator
         if (model.creator?.username) {
             const creator = document.createElement("div");
-            creator.innerHTML = `by <span style="color: #6a9fd4;">${model.creator.username}</span>`;
             creator.style.cssText = "font-size: 14px; color: #888; margin-bottom: 15px;";
+
+            const byText = document.createTextNode("by ");
+            creator.appendChild(byText);
+
+            const creatorLink = document.createElement("span");
+            creatorLink.textContent = model.creator.username;
+            creatorLink.style.cssText = "color: #6a9fd4; cursor: pointer; text-decoration: underline;";
+            creatorLink.title = `View all models by ${model.creator.username}`;
+            creatorLink.onclick = () => {
+                // Set creator filter and go back to grid
+                this.filters.username = model.creator.username;
+                this.filters.downloadedOnly = false;
+                this.filters.updatesOnly = false;
+
+                // Update the creator input in sidebar if it exists
+                const creatorInput = this.dialog?.querySelector("#donut-civitai-creator-filter");
+                if (creatorInput) {
+                    creatorInput.value = model.creator.username;
+                    // Show the clear button
+                    const clearBtn = creatorInput.parentElement?.querySelector("span");
+                    if (clearBtn) clearBtn.style.display = "block";
+                }
+
+                this.resetPagination();
+                this.currentView = "grid";
+                this.search();
+            };
+            creator.appendChild(creatorLink);
+
             rightSide.appendChild(creator);
         }
 
@@ -2858,6 +3236,9 @@ class DonutCivitaiBrowser {
                 const opt = document.createElement("option");
                 opt.value = i;
                 opt.textContent = `${v.name} - ${v.baseModel}`;
+                if (i === initialVersionIndex) {
+                    opt.selected = true;
+                }
                 versionSelect.appendChild(opt);
             }
 
@@ -3300,27 +3681,27 @@ class DonutCivitaiBrowser {
     }
 
     detectBaseModelFromNode(node) {
-        // Try to detect base model from the node's block_preset widget
+        // Try to detect base model from any of the node's block_preset widgets
         if (!node || !node.widgets) return [];
 
-        // Find the block_preset widget
-        const presetWidget = node.widgets.find(w => w.name === "block_preset");
-        if (!presetWidget || !presetWidget.value || presetWidget.value === "None") {
-            return [];
-        }
+        // Check all three block_preset widgets
+        for (let i = 1; i <= 3; i++) {
+            const presetWidget = node.widgets.find(w => w.name === `block_preset_${i}`);
+            if (presetWidget && presetWidget.value && presetWidget.value !== "None") {
+                const preset = presetWidget.value;
 
-        const preset = presetWidget.value;
-
-        // Map preset prefixes to CivitAI base model filters
-        // Note: Use exact CivitAI filter names (with spaces)
-        if (preset.startsWith("SDXL")) {
-            return ["SDXL 1.0"];
-        } else if (preset.startsWith("SD15")) {
-            return ["SD 1.5"];
-        } else if (preset.startsWith("ZIT")) {
-            return ["Z Image Turbo"];
-        } else if (preset.startsWith("FLUX")) {
-            return ["Flux .1 D"];
+                // Map preset prefixes to CivitAI base model filters
+                // Note: Use exact CivitAI filter names (with spaces)
+                if (preset.startsWith("SDXL")) {
+                    return ["SDXL 1.0"];
+                } else if (preset.startsWith("SD15")) {
+                    return ["SD 1.5"];
+                } else if (preset.startsWith("ZIT")) {
+                    return ["Z Image Turbo"];
+                } else if (preset.startsWith("FLUX")) {
+                    return ["Flux.1 D"];
+                }
+            }
         }
 
         return [];
@@ -3474,6 +3855,410 @@ class DonutCivitaiBrowser {
         // Reset target node
         this.targetNode = null;
     }
+
+    /**
+     * Show a dialog for importing CivitAI URLs directly into LoRA slots
+     * @param {object} targetNode - The DonutLoRAStack node to load into
+     */
+    async showUrlImportDialog(targetNode) {
+        this.targetNode = targetNode;
+
+        // Ensure local hashes are loaded for checking already-downloaded models
+        await this.loadLocalHashes();
+
+        // Create overlay
+        const overlay = document.createElement("div");
+        overlay.id = "donut-url-import-overlay";
+        overlay.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 10000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        `;
+
+        // Create dialog
+        const dialog = document.createElement("div");
+        dialog.style.cssText = `
+            background: #1a1a2e;
+            border-radius: 12px;
+            padding: 24px;
+            width: 500px;
+            max-width: 90vw;
+            max-height: 80vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        `;
+
+        // Header
+        const header = document.createElement("div");
+        header.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;";
+        header.innerHTML = `
+            <h2 style="margin: 0; color: #eee; font-size: 18px;">Import from CivitAI URLs</h2>
+        `;
+
+        const closeBtn = document.createElement("button");
+        closeBtn.innerHTML = "✕";
+        closeBtn.style.cssText = `
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 20px;
+            cursor: pointer;
+            padding: 4px 8px;
+        `;
+        closeBtn.onmouseenter = () => closeBtn.style.color = "#fff";
+        closeBtn.onmouseleave = () => closeBtn.style.color = "#888";
+        closeBtn.onclick = () => overlay.remove();
+        header.appendChild(closeBtn);
+        dialog.appendChild(header);
+
+        // Instructions
+        const instructions = document.createElement("div");
+        instructions.style.cssText = "color: #888; font-size: 13px; margin-bottom: 16px; line-height: 1.5;";
+        instructions.innerHTML = `
+            Paste CivitAI URLs (one per line) to download and load LoRAs into slots.<br>
+            <span style="color: #666;">Example: https://civitai.com/models/12345/model-name?modelVersionId=67890</span>
+        `;
+        dialog.appendChild(instructions);
+
+        // Textarea for URLs
+        const textarea = document.createElement("textarea");
+        textarea.id = "donut-url-import-input";
+        textarea.placeholder = "Paste CivitAI URLs here (one per line)...";
+        textarea.style.cssText = `
+            width: 100%;
+            height: 150px;
+            background: #0d0d1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            color: #eee;
+            font-size: 13px;
+            font-family: monospace;
+            padding: 12px;
+            resize: vertical;
+            margin-bottom: 16px;
+            box-sizing: border-box;
+        `;
+        dialog.appendChild(textarea);
+
+        // Slot selector
+        const slotSection = document.createElement("div");
+        slotSection.style.cssText = "margin-bottom: 16px;";
+
+        const slotLabel = document.createElement("div");
+        slotLabel.textContent = "Starting slot:";
+        slotLabel.style.cssText = "color: #888; font-size: 13px; margin-bottom: 8px;";
+        slotSection.appendChild(slotLabel);
+
+        const slotSelect = document.createElement("select");
+        slotSelect.id = "donut-url-import-slot";
+        slotSelect.style.cssText = `
+            background: #0d0d1a;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: #eee;
+            padding: 8px 12px;
+            font-size: 14px;
+            cursor: pointer;
+        `;
+        for (let i = 1; i <= 3; i++) {
+            const opt = document.createElement("option");
+            opt.value = i;
+            opt.textContent = `Slot ${i}`;
+            slotSelect.appendChild(opt);
+        }
+        slotSection.appendChild(slotSelect);
+
+        const slotNote = document.createElement("div");
+        slotNote.style.cssText = "color: #666; font-size: 12px; margin-top: 6px;";
+        slotNote.textContent = "LoRAs will be loaded into consecutive slots starting from this one.";
+        slotSection.appendChild(slotNote);
+
+        dialog.appendChild(slotSection);
+
+        // Status area
+        const statusArea = document.createElement("div");
+        statusArea.id = "donut-url-import-status";
+        statusArea.style.cssText = `
+            background: #0d0d1a;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 16px;
+            max-height: 120px;
+            overflow-y: auto;
+            display: none;
+            font-size: 13px;
+            line-height: 1.6;
+        `;
+        dialog.appendChild(statusArea);
+
+        // Buttons
+        const buttons = document.createElement("div");
+        buttons.style.cssText = "display: flex; gap: 12px; justify-content: flex-end;";
+
+        const cancelBtn = document.createElement("button");
+        cancelBtn.textContent = "Cancel";
+        cancelBtn.style.cssText = `
+            background: #333;
+            border: none;
+            border-radius: 6px;
+            color: #eee;
+            padding: 10px 20px;
+            font-size: 14px;
+            cursor: pointer;
+        `;
+        cancelBtn.onmouseenter = () => cancelBtn.style.background = "#444";
+        cancelBtn.onmouseleave = () => cancelBtn.style.background = "#333";
+        cancelBtn.onclick = () => overlay.remove();
+        buttons.appendChild(cancelBtn);
+
+        const importBtn = document.createElement("button");
+        importBtn.textContent = "Download & Load";
+        importBtn.style.cssText = `
+            background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+            border: none;
+            border-radius: 6px;
+            color: white;
+            padding: 10px 20px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+        `;
+        importBtn.onclick = () => this.processUrlImport(textarea, slotSelect, statusArea, importBtn, overlay);
+        buttons.appendChild(importBtn);
+
+        dialog.appendChild(buttons);
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+
+        // Focus textarea
+        textarea.focus();
+
+        // Close on escape
+        const escHandler = (e) => {
+            if (e.key === "Escape") {
+                overlay.remove();
+                document.removeEventListener("keydown", escHandler);
+            }
+        };
+        document.addEventListener("keydown", escHandler);
+
+        // Close on overlay click
+        overlay.onclick = (e) => {
+            if (e.target === overlay) overlay.remove();
+        };
+    }
+
+    /**
+     * Process the URL import - parse URLs, fetch model info, download, and load
+     */
+    async processUrlImport(textarea, slotSelect, statusArea, importBtn, overlay) {
+        const urls = textarea.value.trim().split("\n").filter(line => line.trim());
+        if (urls.length === 0) {
+            this.showNotification("No URLs", "Please paste at least one CivitAI URL", 3000);
+            return;
+        }
+
+        // Parse all URLs first
+        const parsedUrls = [];
+        for (const url of urls) {
+            const parsed = this.parseCivitaiUrl(url.trim());
+            if (parsed) {
+                parsedUrls.push({ url: url.trim(), ...parsed });
+            }
+        }
+
+        if (parsedUrls.length === 0) {
+            this.showNotification("Invalid URLs", "No valid CivitAI model URLs found", 3000);
+            return;
+        }
+
+        // Show status area and disable import button
+        statusArea.style.display = "block";
+        statusArea.innerHTML = "";
+        importBtn.disabled = true;
+        importBtn.style.opacity = "0.6";
+        importBtn.textContent = "Processing...";
+        textarea.disabled = true;
+        slotSelect.disabled = true;
+
+        let currentSlot = parseInt(slotSelect.value, 10);
+
+        const addStatus = (text, color = "#aaa") => {
+            const line = document.createElement("div");
+            line.style.color = color;
+            line.textContent = text;
+            statusArea.appendChild(line);
+            statusArea.scrollTop = statusArea.scrollHeight;
+        };
+
+        addStatus(`Found ${parsedUrls.length} valid URL(s), starting download...`);
+
+        for (let i = 0; i < parsedUrls.length; i++) {
+            const { modelId, versionId } = parsedUrls[i];
+
+            if (currentSlot > 3) {
+                addStatus(`⚠ Slot limit reached, skipping remaining URLs`, "#ffaa00");
+                break;
+            }
+
+            addStatus(`[${i + 1}/${parsedUrls.length}] Fetching model ${modelId}...`);
+
+            try {
+                // Fetch model details
+                const response = await api.fetchApi(`/donut/civitai/model/${modelId}`);
+                if (!response.ok) {
+                    addStatus(`✗ Failed to fetch model ${modelId}`, "#ff6666");
+                    continue;
+                }
+
+                const model = await response.json();
+                const modelName = model.name || `Model ${modelId}`;
+
+                // Find the right version
+                let version = model.modelVersions?.[0];
+                if (versionId && model.modelVersions?.length) {
+                    const found = model.modelVersions.find(v => v.id === versionId);
+                    if (found) version = found;
+                }
+
+                if (!version) {
+                    addStatus(`✗ No version found for ${modelName}`, "#ff6666");
+                    continue;
+                }
+
+                const file = version.files?.[0];
+                if (!file) {
+                    addStatus(`✗ No downloadable file for ${modelName}`, "#ff6666");
+                    continue;
+                }
+
+                // Check if it's a LoRA type
+                if (!["LORA", "LoCon", "DoRA"].includes(model.type)) {
+                    addStatus(`⚠ ${modelName} is not a LoRA (${model.type}), skipping`, "#ffaa00");
+                    continue;
+                }
+
+                // Check if already downloaded
+                const sha256 = file.hashes?.SHA256;
+                if (sha256 && this.localHashes.has(sha256)) {
+                    addStatus(`✓ ${modelName} already downloaded, loading to slot ${currentSlot}`, "#66ff66");
+                    // Load directly
+                    this.loadLoraToSlot({
+                        url: version.downloadUrl,
+                        filename: file.name,
+                        sha256: sha256,
+                        baseModel: version.baseModel
+                    }, currentSlot);
+                    currentSlot++;
+                    continue;
+                }
+
+                // Download
+                addStatus(`↓ Downloading ${modelName} (${this.formatBytes(file.sizeKB * 1024)})...`);
+
+                const downloadResponse = await api.fetchApi("/donut/civitai/download", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        downloadUrl: file.downloadUrl,
+                        modelType: model.type,
+                        baseModel: version.baseModel,
+                        filename: file.name,
+                        sha256: sha256
+                    })
+                });
+
+                if (!downloadResponse.ok) {
+                    const error = await downloadResponse.text();
+                    addStatus(`✗ Download failed: ${error}`, "#ff6666");
+                    continue;
+                }
+
+                const downloadData = await downloadResponse.json();
+                const downloadId = downloadData.downloadId;
+
+                // Poll for completion
+                let completed = false;
+                let pollAttempts = 0;
+                const maxAttempts = 300; // 5 minutes max
+                let lastProgressPct = 0;
+
+                while (!completed && pollAttempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    pollAttempts++;
+
+                    try {
+                        const progressResponse = await api.fetchApi(`/donut/civitai/download/status/${downloadId}`);
+                        if (progressResponse.ok) {
+                            const progress = await progressResponse.json();
+
+                            // Update progress display every 10%
+                            const pct = Math.round(progress.progress || 0);
+                            if (pct > lastProgressPct + 9) {
+                                lastProgressPct = pct;
+                                // Update the last status line with progress
+                                const lastLine = statusArea.lastElementChild;
+                                if (lastLine && lastLine.textContent.startsWith("↓")) {
+                                    lastLine.textContent = `↓ Downloading ${modelName} (${pct}%)...`;
+                                }
+                            }
+
+                            if (progress.status === "completed") {
+                                completed = true;
+                                addStatus(`✓ Downloaded ${modelName}, loading to slot ${currentSlot}`, "#66ff66");
+
+                                // Add to local hashes
+                                if (sha256) this.localHashes.add(sha256);
+
+                                // Load to slot
+                                this.loadLoraToSlot({
+                                    url: version.downloadUrl,
+                                    filename: file.name,
+                                    sha256: sha256,
+                                    baseModel: version.baseModel
+                                }, currentSlot);
+                                currentSlot++;
+                            } else if (progress.status === "failed" || progress.status === "error") {
+                                addStatus(`✗ Download failed: ${progress.error || "Unknown error"}`, "#ff6666");
+                                completed = true;
+                            }
+                        } else {
+                            // If progress endpoint returns error, download might have finished already
+                            // Check if the file exists by trying to reload hashes
+                            console.log(`[URL Import] Progress check returned ${progressResponse.status}`);
+                        }
+                    } catch (e) {
+                        console.log(`[URL Import] Poll error:`, e);
+                        // Ignore poll errors, continue waiting
+                    }
+                }
+
+                if (!completed) {
+                    addStatus(`✗ Download timed out for ${modelName}`, "#ff6666");
+                }
+
+            } catch (error) {
+                addStatus(`✗ Error processing model ${modelId}: ${error.message}`, "#ff6666");
+            }
+        }
+
+        addStatus("Done!", "#66ff66");
+
+        // Re-enable controls
+        importBtn.disabled = false;
+        importBtn.style.opacity = "1";
+        importBtn.textContent = "Done";
+        importBtn.onclick = () => overlay.remove();
+    }
 }
 
 // Global instance
@@ -3494,6 +4279,19 @@ style.textContent = `
     @keyframes spin {
         from { transform: rotate(0deg); }
         to { transform: rotate(360deg); }
+    }
+    /* Responsive card widths */
+    .donut-civitai-card {
+        width: calc(25% - 12px) !important;
+    }
+    @media (max-width: 1400px) {
+        .donut-civitai-card { width: calc(33.333% - 11px) !important; }
+    }
+    @media (max-width: 1100px) {
+        .donut-civitai-card { width: calc(50% - 8px) !important; }
+    }
+    @media (max-width: 800px) {
+        .donut-civitai-card { width: 100% !important; }
     }
 `;
 document.head.appendChild(style);
@@ -3666,12 +4464,20 @@ app.registerExtension({
 
                 // Add CivitAI browser option
                 options.push({
-                    content: "Download from CivitAI",
+                    content: "Browse CivitAI",
                     callback: () => {
                         // Pass the node as the target so we get "Download & Load to Slot" buttons
                         civitaiBrowser.show((selectedModel) => {
                             console.log("[CivitAI] Selected model:", selectedModel);
                         }, node);
+                    }
+                });
+
+                // Add URL import option
+                options.push({
+                    content: "Import from CivitAI URLs",
+                    callback: () => {
+                        civitaiBrowser.showUrlImportDialog(node);
                     }
                 });
             };

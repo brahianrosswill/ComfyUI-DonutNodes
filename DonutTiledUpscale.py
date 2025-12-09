@@ -56,42 +56,176 @@ def upscale_with_model(upscale_model, image):
     return s
 
 
-def calculate_tiling(original_width, original_height, rescale_factor, feather_percent):
+def find_all_valid_configs(input_width, input_height, feather_percent, max_tiles=6):
     """
-    Calculate tiling based on the original image dimensions and scale factor.
+    Find ALL valid tiling configurations with <0.5% aspect error.
 
-    Each tile will be the size of the original image. The number of tiles
-    is determined by the rescale factor (e.g., 2x = 2x2 tiles, 3x = 3x3 tiles).
+    For each grid (nx x ny), search all ~1MP tile sizes to find configs where:
+    - Tile is ~1MP (0.95-1.1 MP)
+    - Tile aspect is within 2:1 (0.5 to 2.0)
+    - Tile dimensions are multiples of 64
+    - Overlap is 5-40% of tile dimension
+    - Output aspect matches input aspect (<0.5% error)
 
-    feather_percent controls the overlap/blend zone as a percentage of tile size.
+    Args:
+        input_width, input_height: Original image dimensions
+        feather_percent: Target feather percentage (for preference)
+        max_tiles: Maximum tiles per axis to search
 
-    Returns (tile_width, tile_height, overlap_x, overlap_y, num_tiles_x, num_tiles_y, output_width, output_height)
+    Returns:
+        List of config dicts sorted by scale
     """
-    # Tile size matches original image dimensions
-    tile_width = original_width
-    tile_height = original_height
+    import math
 
-    # Number of tiles based on scale factor (round to nearest integer)
-    num_tiles_x = max(1, round(rescale_factor))
-    num_tiles_y = max(1, round(rescale_factor))
+    TARGET_PIXELS = 1048576
+    input_aspect = input_width / input_height
 
-    # Overlap proportional to each dimension to preserve aspect ratio
-    overlap_x = int(tile_width * feather_percent / 100)
-    overlap_y = int(tile_height * feather_percent / 100)
+    configs = []
 
-    # Make sure overlap is divisible by 8 for VAE compatibility
-    overlap_x = (overlap_x // 8) * 8
-    overlap_y = (overlap_y // 8) * 8
+    # 1x1 = original size (no tiling)
+    configs.append({
+        'tile_width': input_width,
+        'tile_height': input_height,
+        'overlap_x': 0,
+        'overlap_y': 0,
+        'step_x': input_width,
+        'step_y': input_height,
+        'output_width': input_width,
+        'output_height': input_height,
+        'scale': 1.0,
+        'scale_x': 1.0,
+        'scale_y': 1.0,
+        'nx': 1,
+        'ny': 1,
+        'feather': 0.0,
+        'feather_x': 0.0,
+        'feather_y': 0.0,
+        'aspect_error': 0.0
+    })
 
-    # Calculate step (tile size minus overlap)
-    step_x = tile_width - overlap_x
-    step_y = tile_height - overlap_y
+    # Search all grid configurations
+    for nx in range(1, max_tiles + 1):
+        for ny in range(1, max_tiles + 1):
+            if nx == 1 and ny == 1:
+                continue
 
-    # Output dimensions: first tile full size, then add steps for remaining tiles
-    output_width = tile_width + (num_tiles_x - 1) * step_x
-    output_height = tile_height + (num_tiles_y - 1) * step_y
+            # Search all ~1MP tile sizes (multiples of 64)
+            for tile_h in range(512, 1600, 64):
+                for tile_w in range(512, 1600, 64):
+                    tile_mp = tile_w * tile_h / 1e6
 
-    return (tile_width, tile_height, overlap_x, overlap_y, num_tiles_x, num_tiles_y, output_width, output_height)
+                    # Must be ~1MP (0.95-1.1)
+                    if tile_mp < 0.95 or tile_mp > 1.1:
+                        continue
+
+                    # Tile aspect must be within 2:1
+                    tile_aspect = tile_w / tile_h
+                    if tile_aspect < 0.5 or tile_aspect > 2.0:
+                        continue
+
+                    # Try overlap_x values (5-40% of tile_w)
+                    min_ovl_x = max(8, int(tile_w * 0.05 / 8) * 8)
+                    max_ovl_x = int(tile_w * 0.4 / 8) * 8
+
+                    for overlap_x in range(min_ovl_x, max_ovl_x + 1, 8):
+                        step_x = tile_w - overlap_x
+                        if step_x <= 0:
+                            continue
+
+                        output_w = tile_w + (nx - 1) * step_x
+                        target_output_h = output_w * input_height / input_width
+
+                        if ny == 1:
+                            # Single row: output_h = tile_h
+                            output_h = tile_h
+                            overlap_y = 0
+                            if abs(tile_h - target_output_h) / target_output_h > 0.005:
+                                continue
+                        else:
+                            # Multiple rows: solve for overlap_y
+                            step_y_needed = (target_output_h - tile_h) / (ny - 1)
+                            if step_y_needed <= 0 or step_y_needed >= tile_h:
+                                continue
+
+                            overlap_y = tile_h - step_y_needed
+                            overlap_y = round(overlap_y / 8) * 8
+
+                            # Check overlap_y bounds (5-40%)
+                            if overlap_y < tile_h * 0.05 or overlap_y > tile_h * 0.4:
+                                continue
+
+                            step_y = tile_h - overlap_y
+                            output_h = tile_h + (ny - 1) * step_y
+
+                        # Check aspect error
+                        output_aspect = output_w / output_h
+                        aspect_error = abs(output_aspect - input_aspect) / input_aspect * 100
+
+                        if aspect_error > 0.5:
+                            continue
+
+                        step_y = tile_h - overlap_y
+                        scale = output_w / input_width
+
+                        configs.append({
+                            'tile_width': tile_w,
+                            'tile_height': tile_h,
+                            'overlap_x': overlap_x,
+                            'overlap_y': overlap_y,
+                            'step_x': step_x,
+                            'step_y': step_y,
+                            'output_width': output_w,
+                            'output_height': int(output_h),
+                            'scale': scale,
+                            'scale_x': scale,
+                            'scale_y': output_h / input_height,
+                            'nx': nx,
+                            'ny': ny,
+                            'feather': (overlap_x / tile_w + overlap_y / tile_h) / 2 * 100,
+                            'feather_x': overlap_x / tile_w * 100,
+                            'feather_y': overlap_y / tile_h * 100,
+                            'aspect_error': aspect_error
+                        })
+
+    # Sort by scale
+    configs.sort(key=lambda c: c['scale'])
+    return configs
+
+
+def find_best_tiling(input_width, input_height, target_scale, feather_percent, max_tiles=6):
+    """
+    Find the best grid configuration that achieves a scale closest to target.
+
+    Searches ALL valid configurations with 0% aspect error and returns the one
+    closest to the target scale, preferring configurations with feather closer
+    to the requested percentage.
+
+    Args:
+        input_width, input_height: Original image dimensions
+        target_scale: User's requested scale factor
+        feather_percent: Target feather percentage
+        max_tiles: Maximum tiles per axis to search
+
+    Returns:
+        dict with: nx, ny, tile_width, tile_height, output_width, output_height, scale, etc.
+    """
+    all_configs = find_all_valid_configs(input_width, input_height, feather_percent, max_tiles)
+
+    if not all_configs:
+        raise ValueError("No valid tiling configuration found")
+
+    # Find configs closest to target scale
+    for config in all_configs:
+        config['scale_err'] = abs(config['scale'] - target_scale)
+        config['feather_err'] = abs(config['feather'] - feather_percent)
+        config['total_tiles'] = config['nx'] * config['ny']
+
+    # Sort by: scale error first, then feather error, then fewer tiles
+    all_configs.sort(key=lambda c: (c['scale_err'], c['feather_err'], c['total_tiles']))
+
+    return all_configs[0]
+
+
 
 
 def tensor_to_pil(tensor, batch_index=0):
@@ -107,16 +241,12 @@ def pil_to_tensor(image):
     return torch.from_numpy(arr).unsqueeze(0)
 
 
-def create_debug_image(width, height, tile_width, tile_height, overlap_x, overlap_y, num_tiles_x, num_tiles_y,
-                       original_width, original_height, rescale_factor):
+def create_debug_image(output_width, output_height, tile_width, tile_height, overlap_x, overlap_y, num_tiles_x, num_tiles_y,
+                       original_width, original_height, actual_scale, target_scale):
     """
-    Create a debug visualization showing tile layout, overlap zones, and dimensions.
-    Uses separate overlap_x and overlap_y to preserve aspect ratio.
+    Create a debug visualization showing tile layout and dimensions.
+    Shows actual tile boundaries (all same size) with overlap zones highlighted.
     """
-    # Create image with dark background
-    debug_img = Image.new('RGB', (width, height), (40, 40, 40))
-    draw = ImageDraw.Draw(debug_img)
-
     step_x = tile_width - overlap_x
     step_y = tile_height - overlap_y
 
@@ -136,14 +266,75 @@ def create_debug_image(width, height, tile_width, tile_height, overlap_x, overla
             font_large = font
 
     # Color scheme
-    tile_border_color = (100, 200, 255)  # Light blue for tile borders
-    overlap_color = (255, 150, 50, 128)  # Orange for overlap zones
-    feather_color = (255, 100, 100)  # Red for feather gradients
-    ruler_color = (200, 200, 200)  # Light gray for rulers
-    text_color = (255, 255, 255)  # White for text
-    dim_text_color = (180, 180, 180)  # Dimmer text
+    text_color = (255, 255, 255)
+    dim_text_color = (180, 180, 180)
 
-    # Draw tiles
+    # Create base canvas
+    debug_img = Image.new('RGB', (output_width, output_height), (40, 40, 40))
+    draw = ImageDraw.Draw(debug_img)
+
+    # Draw actual tile rectangles (all same size: tile_width x tile_height)
+    # Each tile is offset by step_x/step_y from the previous
+    tile_colors = [
+        (60, 80, 100),   # Blue-ish
+        (80, 60, 100),   # Purple-ish
+        (60, 100, 80),   # Green-ish
+        (100, 80, 60),   # Orange-ish
+        (80, 100, 60),   # Lime-ish
+        (100, 60, 80),   # Pink-ish
+    ]
+
+    for ty in range(num_tiles_y):
+        for tx in range(num_tiles_x):
+            # Actual tile position
+            x1 = tx * step_x
+            y1 = ty * step_y
+            x2 = x1 + tile_width
+            y2 = y1 + tile_height
+
+            # Color based on tile index for variety
+            tile_idx = ty * num_tiles_x + tx
+            color = tile_colors[tile_idx % len(tile_colors)]
+
+            # Draw filled rectangle with border
+            draw.rectangle([x1, y1, x2, y2], fill=color, outline=(150, 150, 150), width=2)
+
+    # Draw overlap zones on top (semi-transparent effect via darker color)
+    # Horizontal seams (between rows)
+    if overlap_y > 0:
+        for ty in range(1, num_tiles_y):
+            seam_y = ty * step_y
+            y1 = seam_y
+            y2 = seam_y + overlap_y
+            draw.rectangle([0, y1, output_width, y2], fill=(120, 60, 60))
+
+    # Vertical seams (between columns)
+    if overlap_x > 0:
+        for tx in range(1, num_tiles_x):
+            seam_x = tx * step_x
+            x1 = seam_x
+            x2 = seam_x + overlap_x
+            draw.rectangle([x1, 0, x2, output_height], fill=(120, 60, 60))
+
+    # Corner overlaps
+    if overlap_x > 0 and overlap_y > 0:
+        for ty in range(1, num_tiles_y):
+            for tx in range(1, num_tiles_x):
+                seam_x = tx * step_x
+                seam_y = ty * step_y
+                draw.rectangle([seam_x, seam_y, seam_x + overlap_x, seam_y + overlap_y],
+                             fill=(150, 70, 70))
+
+    # Redraw tile borders on top so they're visible
+    for ty in range(num_tiles_y):
+        for tx in range(num_tiles_x):
+            x1 = tx * step_x
+            y1 = ty * step_y
+            x2 = x1 + tile_width
+            y2 = y1 + tile_height
+            draw.rectangle([x1, y1, x2, y2], outline=(200, 200, 200), width=2)
+
+    # Draw tile labels
     for ty in range(num_tiles_y):
         for tx in range(num_tiles_x):
             x1 = tx * step_x
@@ -151,98 +342,33 @@ def create_debug_image(width, height, tile_width, tile_height, overlap_x, overla
             x2 = x1 + tile_width
             y2 = y1 + tile_height
 
-            # Fill tile with semi-transparent color (alternating for visibility)
-            tile_color = (60, 80, 100) if (tx + ty) % 2 == 0 else (80, 60, 100)
-            draw.rectangle([x1, y1, x2, y2], fill=tile_color)
-
-            # Draw tile border
-            draw.rectangle([x1, y1, x2, y2], outline=tile_border_color, width=2)
-
-            # Draw tile number in center
             tile_num = ty * num_tiles_x + tx + 1
             tile_label = f"Tile {tile_num}"
+            center_x = (x1 + x2) // 2
+            center_y = (y1 + y2) // 2
+
             bbox = draw.textbbox((0, 0), tile_label, font=font)
             text_w = bbox[2] - bbox[0]
             text_h = bbox[3] - bbox[1]
-            text_x = x1 + (tile_width - text_w) // 2
-            text_y = y1 + (tile_height - text_h) // 2
-            draw.text((text_x, text_y), tile_label, fill=text_color, font=font)
+            draw.text((center_x - text_w // 2, center_y - text_h // 2), tile_label, fill=text_color, font=font)
 
-            # Draw tile dimensions below tile number
             dim_label = f"{tile_width}x{tile_height}"
             bbox = draw.textbbox((0, 0), dim_label, font=font_small)
             dim_w = bbox[2] - bbox[0]
-            draw.text((x1 + (tile_width - dim_w) // 2, text_y + text_h + 5),
+            draw.text((center_x - dim_w // 2, center_y + text_h // 2 + 5),
                       dim_label, fill=dim_text_color, font=font_small)
 
-    # Draw overlap zones (horizontal) using overlap_x
-    for ty in range(num_tiles_y):
-        for tx in range(num_tiles_x - 1):
-            x1 = (tx + 1) * step_x
-            y1 = ty * step_y
-            # Draw overlap region
-            for i in range(overlap_x):
-                alpha = int(255 * (1 - i / overlap_x)) if overlap_x > 0 else 0
-                # Left feather (from previous tile)
-                draw.line([(x1 + i, y1), (x1 + i, y1 + tile_height)],
-                          fill=(255, 100, 100, alpha), width=1)
-
-    # Draw overlap zones (vertical) using overlap_y
-    for ty in range(num_tiles_y - 1):
-        for tx in range(num_tiles_x):
-            x1 = tx * step_x
-            y1 = (ty + 1) * step_y
-            # Draw overlap region
-            for i in range(overlap_y):
-                alpha = int(255 * (1 - i / overlap_y)) if overlap_y > 0 else 0
-                draw.line([(x1, y1 + i), (x1 + tile_width, y1 + i)],
-                          fill=(255, 100, 100, alpha), width=1)
-
-    # Draw rulers on top and left
-    ruler_height = 30
-    ruler_width = 30
-
-    # Top ruler background
-    draw.rectangle([0, 0, width, ruler_height], fill=(30, 30, 30))
-    # Left ruler background
-    draw.rectangle([0, 0, ruler_width, height], fill=(30, 30, 30))
-
-    # Draw tick marks and labels for width
-    # Major ticks at tile boundaries
-    for tx in range(num_tiles_x + 1):
-        x = tx * step_x if tx < num_tiles_x else width
-        if tx == num_tiles_x:
-            x = width
-        draw.line([(x, 0), (x, ruler_height)], fill=ruler_color, width=2)
-        if tx < num_tiles_x:
-            # Label the step distance
-            label = f"{step_x}px" if tx > 0 else f"{tile_width}px"
-            mid_x = tx * step_x + step_x // 2 if tx > 0 else tile_width // 2
-            if tx == 0:
-                mid_x = tile_width // 2
-            bbox = draw.textbbox((0, 0), label, font=font_small)
-            text_w = bbox[2] - bbox[0]
-            if mid_x - text_w // 2 > ruler_width:
-                draw.text((mid_x - text_w // 2, 8), label, fill=dim_text_color, font=font_small)
-
-    # Draw tick marks and labels for height
-    for ty in range(num_tiles_y + 1):
-        y = ty * step_y if ty < num_tiles_y else height
-        if ty == num_tiles_y:
-            y = height
-        draw.line([(0, y), (ruler_width, y)], fill=ruler_color, width=2)
-
     # Total dimensions label (top-right corner)
-    total_label = f"Output: {width}x{height}"
+    total_label = f"Output: {output_width}x{output_height}"
     bbox = draw.textbbox((0, 0), total_label, font=font_large)
     text_w = bbox[2] - bbox[0]
-    draw.rectangle([width - text_w - 20, 0, width, 25], fill=(60, 60, 60))
-    draw.text((width - text_w - 10, 5), total_label, fill=text_color, font=font_large)
+    draw.rectangle([output_width - text_w - 20, 0, output_width, 25], fill=(60, 60, 60))
+    draw.text((output_width - text_w - 10, 5), total_label, fill=text_color, font=font_large)
 
     # Info box in bottom-left
     info_lines = [
         f"Original: {original_width}x{original_height}",
-        f"Scale: {rescale_factor:.2f}x",
+        f"Target: {target_scale:.2f}x -> Actual: {actual_scale:.2f}x",
         f"Tiles: {num_tiles_x}x{num_tiles_y} = {num_tiles_x * num_tiles_y}",
         f"Tile size: {tile_width}x{tile_height}",
         f"Overlap: {overlap_x}x{overlap_y}px",
@@ -250,9 +376,9 @@ def create_debug_image(width, height, tile_width, tile_height, overlap_x, overla
     ]
 
     box_height = len(info_lines) * 18 + 10
-    box_width = 180
+    box_width = 220
     box_x = 5
-    box_y = height - box_height - 5
+    box_y = output_height - box_height - 5
 
     draw.rectangle([box_x, box_y, box_x + box_width, box_y + box_height],
                    fill=(20, 20, 20, 200), outline=(100, 100, 100))
@@ -261,17 +387,15 @@ def create_debug_image(width, height, tile_width, tile_height, overlap_x, overla
         draw.text((box_x + 8, box_y + 5 + i * 18), line, fill=text_color, font=font_small)
 
     # Legend in bottom-right
-    legend_x = width - 150
-    legend_y = height - 70
-    draw.rectangle([legend_x, legend_y, width - 5, height - 5],
+    legend_x = output_width - 150
+    legend_y = output_height - 60
+    draw.rectangle([legend_x, legend_y, output_width - 5, output_height - 5],
                    fill=(20, 20, 20, 200), outline=(100, 100, 100))
     draw.text((legend_x + 5, legend_y + 5), "Legend:", fill=text_color, font=font_small)
-    draw.rectangle([legend_x + 5, legend_y + 22, legend_x + 20, legend_y + 32],
-                   outline=tile_border_color, width=2)
-    draw.text((legend_x + 25, legend_y + 20), "Tile border", fill=dim_text_color, font=font_small)
-    draw.rectangle([legend_x + 5, legend_y + 40, legend_x + 20, legend_y + 50],
-                   fill=(255, 100, 100))
-    draw.text((legend_x + 25, legend_y + 38), "Feather zone", fill=dim_text_color, font=font_small)
+    draw.rectangle([legend_x + 5, legend_y + 22, legend_x + 20, legend_y + 32], outline=(200, 200, 200), width=2)
+    draw.text((legend_x + 25, legend_y + 20), "Tile boundary", fill=dim_text_color, font=font_small)
+    draw.rectangle([legend_x + 5, legend_y + 37, legend_x + 20, legend_y + 47], fill=(120, 60, 60))
+    draw.text((legend_x + 25, legend_y + 35), "Overlap zone", fill=dim_text_color, font=font_small)
 
     return debug_img
 
@@ -299,7 +423,7 @@ class DonutTiledUpscale:
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
                 "denoise": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "rescale_factor": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 8.0, "step": 0.5, "tooltip": "Upscale factor. 2x = 2x2 tiles, 3x = 3x3 tiles. Each tile matches original image size."}),
+                "rescale_factor": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 8.0, "step": 0.5, "tooltip": "Upscale factor. Tiles are ~1MP and auto-selected to best match this scale."}),
                 "resampling_method": (resampling_methods, {"default": "lanczos"}),
                 "feather": ("FLOAT", {"default": 15.0, "min": 0.0, "max": 50.0, "step": 1.0, "tooltip": "Feather/blend zone as percentage of tile size. Higher = smoother transitions."}),
                 "tiled_vae": ("BOOLEAN", {"default": False}),
@@ -327,17 +451,26 @@ class DonutTiledUpscale:
         # Get image dimensions (B, H, W, C)
         batch_size, img_height, img_width, channels = image.shape
 
-        # Calculate tiling based on original image size and scale factor
-        # Each tile will be the size of the original image
-        tile_width, tile_height, overlap_x, overlap_y, num_tiles_x, num_tiles_y, output_width, output_height = calculate_tiling(
-            img_width, img_height, rescale_factor, feather
-        )
+        # Find best grid configuration (calculates tile sizes automatically)
+        config = find_best_tiling(img_width, img_height, rescale_factor, feather)
 
-        print(f"[DonutTiledUpscale] Input: {img_width}x{img_height}")
-        print(f"[DonutTiledUpscale] Scale: {rescale_factor}x -> {num_tiles_x}x{num_tiles_y} tiles")
-        print(f"[DonutTiledUpscale] Tile size: {tile_width}x{tile_height} (matches original)")
-        print(f"[DonutTiledUpscale] Overlap/Feather: {overlap_x}x{overlap_y}px ({feather}%)")
-        print(f"[DonutTiledUpscale] Output: {output_width}x{output_height}")
+        num_tiles_x = config['nx']
+        num_tiles_y = config['ny']
+        tile_width = config['tile_width']
+        tile_height = config['tile_height']
+        overlap_x = config['overlap_x']
+        overlap_y = config['overlap_y']
+        output_width = config['output_width']
+        output_height = config['output_height']
+        actual_scale = config['scale']
+        step_x = config['step_x']
+        step_y = config['step_y']
+
+        print(f"[DonutTiledUpscale] Input: {img_width}x{img_height} (aspect {img_width/img_height:.4f})")
+        print(f"[DonutTiledUpscale] Requested: {rescale_factor:.2f}x -> Actual: {actual_scale:.2f}x")
+        print(f"[DonutTiledUpscale] Tile: {tile_width}x{tile_height}, {num_tiles_x}x{num_tiles_y} grid")
+        print(f"[DonutTiledUpscale] Overlap: {overlap_x}x{overlap_y}px ({feather}%), Step: {step_x}x{step_y}px")
+        print(f"[DonutTiledUpscale] Output: {output_width}x{output_height} (aspect {output_width/output_height:.4f})")
 
         # Get upscale factor from the model
         model_scale = upscale_model.scale
@@ -348,10 +481,6 @@ class DonutTiledUpscale:
         upscaled_image = upscale_with_model(upscale_model, image)
         _, up_height, up_width, _ = upscaled_image.shape
         print(f"[DonutTiledUpscale] After model upscale: {up_width}x{up_height}")
-
-        # Calculate step between tiles
-        step_x = tile_width - overlap_x
-        step_y = tile_height - overlap_y
 
         total_tiles = num_tiles_x * num_tiles_y
         print(f"[DonutTiledUpscale] Processing {total_tiles} total tiles")
@@ -381,13 +510,13 @@ class DonutTiledUpscale:
                 for tx in range(num_tiles_x):
                     tile_idx += 1
 
-                    # Calculate tile coordinates - tiles fit exactly
+                    # Calculate tile coordinates
                     x1 = tx * step_x
                     y1 = ty * step_y
                     x2 = x1 + tile_width
                     y2 = y1 + tile_height
 
-                    # Crop tile (always exact tile size)
+                    # Crop tile from scaled image
                     tile = pil_image.crop((x1, y1, x2, y2))
 
                     # Convert to tensor for VAE encoding
@@ -447,10 +576,11 @@ class DonutTiledUpscale:
         # Generate debug image
         debug_pil = create_debug_image(
             output_width, output_height,
-            tile_width, tile_height, overlap_x, overlap_y,
+            tile_width, tile_height,
+            overlap_x, overlap_y,
             num_tiles_x, num_tiles_y,
             img_width, img_height,
-            rescale_factor
+            actual_scale, rescale_factor
         )
         debug_tensor = pil_to_tensor(debug_pil)
 

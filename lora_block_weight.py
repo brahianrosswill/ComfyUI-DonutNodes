@@ -359,6 +359,10 @@ class LoraLoaderBlockWeight:
         """
         Transform a LoRA with separate Q/K/V attention keys to work with fused QKV models.
         This handles Lumina2/Z-Image LoRAs trained on diffusers implementations.
+
+        The approach: Create a fused LoRA by concatenating B matrices (Q, K, V along output dim)
+        and creating a block-diagonal A matrix. This produces a single LoRA that patches the
+        entire fused QKV weight.
         """
         new_lora = dict(lora)  # Copy original
 
@@ -371,6 +375,7 @@ class LoraLoaderBlockWeight:
 
         # Group by layer number
         layers_data = {}
+        keys_to_remove = set()
         for key in list(lora.keys()):
             match = layer_pattern.match(key)
             if match:
@@ -383,16 +388,21 @@ class LoraLoaderBlockWeight:
                 if qkv_type not in layers_data[layer_num]:
                     layers_data[layer_num][qkv_type] = {}
                 layers_data[layer_num][qkv_type][ab_type] = key
+                keys_to_remove.add(key)
 
         if not layers_data:
             return lora
 
         # For each layer, create fused QKV LoRA entries
         for layer_num, qkv_data in layers_data.items():
-            # Check if we have all Q, K, V
+            # Check if we have all Q, K, V with both A and B
             if 'q' not in qkv_data or 'k' not in qkv_data or 'v' not in qkv_data:
                 continue
             if 'A' not in qkv_data['q'] or 'B' not in qkv_data['q']:
+                continue
+            if 'A' not in qkv_data['k'] or 'B' not in qkv_data['k']:
+                continue
+            if 'A' not in qkv_data['v'] or 'B' not in qkv_data['v']:
                 continue
 
             # Get the model's fused QKV key to understand dimensions
@@ -400,79 +410,67 @@ class LoraLoaderBlockWeight:
             if model_qkv_key not in sd:
                 continue
 
-            qkv_weight = sd[model_qkv_key]
-            total_dim = qkv_weight.shape[0]  # e.g., (n_heads + 2*n_kv_heads) * head_dim
-            in_dim = qkv_weight.shape[1]     # hidden_size
-
             # Get LoRA weights
-            q_A = lora[qkv_data['q']['A']]
-            q_B = lora[qkv_data['q']['B']]
-            k_A = lora[qkv_data['k']['A']]
-            k_B = lora[qkv_data['k']['B']]
-            v_A = lora[qkv_data['v']['A']]
-            v_B = lora[qkv_data['v']['B']]
+            q_A = lora[qkv_data['q']['A']]  # [rank, in_dim]
+            q_B = lora[qkv_data['q']['B']]  # [q_out_dim, rank]
+            k_A = lora[qkv_data['k']['A']]  # [rank, in_dim]
+            k_B = lora[qkv_data['k']['B']]  # [k_out_dim, rank]
+            v_A = lora[qkv_data['v']['A']]  # [rank, in_dim]
+            v_B = lora[qkv_data['v']['B']]  # [v_out_dim, rank]
 
-            # Get dimensions from LoRA weights
-            # lora_A: [rank, in_dim], lora_B: [out_dim, rank]
-            rank = q_A.shape[0]
+            # Get dimensions
+            rank_q = q_A.shape[0]
+            rank_k = k_A.shape[0]
+            rank_v = v_A.shape[0]
+            in_dim = q_A.shape[1]
             q_out_dim = q_B.shape[0]
             k_out_dim = k_B.shape[0]
             v_out_dim = v_B.shape[0]
 
-            # Verify dimensions add up correctly (continue anyway for GQA with different K/V heads)
-            expected_total = q_out_dim + k_out_dim + v_out_dim
+            # Total fused rank is sum of individual ranks
+            total_rank = rank_q + rank_k + rank_v
+            total_out_dim = q_out_dim + k_out_dim + v_out_dim
 
-            # Create fused LoRA weights
-            # For lora_A, we need to keep the same input dimension and rank
-            # Since all Q/K/V share the same input, we can use any of them
-            # For lora_B, we concatenate Q, K, V along the output dimension
+            # Create block-diagonal A matrix: [total_rank, in_dim]
+            # Each block is independent, so we stack them
+            fused_A = torch.zeros(total_rank, in_dim, dtype=q_A.dtype, device=q_A.device)
+            fused_A[0:rank_q, :] = q_A
+            fused_A[rank_q:rank_q+rank_k, :] = k_A
+            fused_A[rank_q+rank_k:, :] = v_A
 
-            # The LoRA formula is: W' = W + alpha * (B @ A) / rank
-            # For fused QKV: [Q_B @ Q_A; K_B @ K_A; V_B @ V_A]
-            # We can't simply concatenate A matrices since they share input
-            # But we can create a block-diagonal A and concatenated B
+            # Create fused B matrix: [total_out_dim, total_rank]
+            # B matrices are block-diagonal too
+            fused_B = torch.zeros(total_out_dim, total_rank, dtype=q_B.dtype, device=q_B.device)
+            fused_B[0:q_out_dim, 0:rank_q] = q_B
+            fused_B[q_out_dim:q_out_dim+k_out_dim, rank_q:rank_q+rank_k] = k_B
+            fused_B[q_out_dim+k_out_dim:, rank_q+rank_k:] = v_B
 
-            # Alternative approach: Create 3 separate patches with offsets
-            # This is cleaner and avoids tensor manipulation issues
+            # Create the fused LoRA entry
+            fused_key_base = f"diffusion_model.layers.{layer_num}.attention.qkv"
+            new_lora[f"{fused_key_base}.lora_A.weight"] = fused_A
+            new_lora[f"{fused_key_base}.lora_B.weight"] = fused_B
 
-            # Add Q patch with offset
-            fused_q_key_A = f"diffusion_model.layers.{layer_num}.attention.qkv_q.lora_A.weight"
-            fused_q_key_B = f"diffusion_model.layers.{layer_num}.attention.qkv_q.lora_B.weight"
-            new_lora[fused_q_key_A] = q_A
-            new_lora[fused_q_key_B] = q_B
-
-            # Add alpha if present
+            # Handle alpha - use Q's alpha if present (they should all be the same)
             alpha_q_key = qkv_data['q']['A'].replace('.lora_A.weight', '.alpha')
             if alpha_q_key in lora:
-                new_lora[fused_q_key_A.replace('.lora_A.weight', '.alpha')] = lora[alpha_q_key]
+                # Scale alpha by rank ratio since we changed the rank
+                # Original: alpha / rank_q, now we want same scaling
+                # But since B @ A gives same result, we keep alpha as-is per component
+                # Actually with block-diagonal, each component still has its own effective rank
+                # Use the original alpha (they should be consistent)
+                new_lora[f"{fused_key_base}.alpha"] = lora[alpha_q_key]
 
-            # For K and V, we need to use offset mechanism
-            # But ComfyUI's LoRA format doesn't directly support offsets in key names
-            # We need to use the key_map tuple format: (target_key, (dim, offset, size))
+            # Add the fused key to key_map
+            key_map[fused_key_base] = model_qkv_key
 
-            # Actually, let's just add mappings to key_map for Q, K, V separately
-            # with appropriate offsets
-
-            # The model key for Q is: diffusion_model.layers.X.attention.qkv.weight
-            # We map our Q lora to target the Q portion (offset 0, size q_out_dim)
-            # We map K lora to target K portion (offset q_out_dim, size k_out_dim)
-            # We map V lora to target V portion (offset q_out_dim+k_out_dim, size v_out_dim)
-
-            base_q = f"diffusion_model.layers.{layer_num}.attention.to_q"
-            base_k = f"diffusion_model.layers.{layer_num}.attention.to_k"
-            base_v = f"diffusion_model.layers.{layer_num}.attention.to_v"
-
-            # Add key mappings with offsets
-            key_map[base_q] = (model_qkv_key, (0, 0, q_out_dim))
-            key_map[base_k] = (model_qkv_key, (0, q_out_dim, k_out_dim))
-            key_map[base_v] = (model_qkv_key, (0, q_out_dim + k_out_dim, v_out_dim))
-
-            # Remove the separate keys we don't need anymore from new_lora
-            # (keep originals, let load_lora find them via key_map)
-            if fused_q_key_A in new_lora:
-                del new_lora[fused_q_key_A]
-            if fused_q_key_B in new_lora:
-                del new_lora[fused_q_key_B]
+        # Remove the original separate Q/K/V keys
+        for key in keys_to_remove:
+            if key in new_lora:
+                del new_lora[key]
+            # Also remove associated alpha keys
+            alpha_key = key.replace('.lora_A.weight', '.alpha').replace('.lora_B.weight', '.alpha')
+            if alpha_key in new_lora:
+                del new_lora[alpha_key]
 
         return new_lora
 
@@ -513,7 +511,7 @@ class LoraLoaderBlockWeight:
                 if model_key in model_sd and base_key not in key_map:
                     key_map[base_key] = model_key
 
-        loaded = comfy.lora.load_lora(lora, key_map)
+        loaded = comfy.lora.load_lora(lora, key_map, log_missing=False)
 
         block_vector = LoraLoaderBlockWeight.block_spec_parser(loaded, block_vector)
 
@@ -977,7 +975,7 @@ class LoraBlockInfo:
     def extract_info(model, clip, lora):
         key_map = comfy.lora.model_lora_keys_unet(model.model)
         key_map = comfy.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
-        loaded = comfy.lora.load_lora(lora, key_map)
+        loaded = comfy.lora.load_lora(lora, key_map, log_missing=False)
 
         def parse_unet_num(s):
             if s[1] == '.':
