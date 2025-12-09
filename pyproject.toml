@@ -1,7 +1,7 @@
 [project]
 name = "donutnodes"
-description = "ComfyUI-DonutNodes offers custom nodes for grouped weight/bias scaling, per-block SDXL control, dual-branch CLIP blending, block-weighted LoRA stacking, and teacache for sdxl."
-version = "1.0.40"
+description = "Block-weighted LoRA stacking with CivitAI integration, Donut Detailer for per-block model tuning, TeaCache acceleration, tiled upscaling, CFG sampling with 18 curve types, and reference-based spectral sharpening."
+version = "1.0.41"
 license = {file = "LICENSE"}
 
 [project.urls]
