@@ -252,6 +252,19 @@ class DonutLoRAStack:
     CATEGORY     = "donut/LoRA"
     OUTPUT_NODE  = True
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        """Allow empty strings for float fields - we handle them in build_stack."""
+        for key in ['model_weight_1', 'clip_weight_1', 'model_weight_2', 'clip_weight_2', 'model_weight_3', 'clip_weight_3']:
+            val = kwargs.get(key)
+            if val == "" or val is None:
+                continue  # Allow empty, we'll default to 1.0
+            try:
+                float(val)
+            except (ValueError, TypeError):
+                return f"Invalid value for {key}: {val}"
+        return True
+
     def build_stack(
         self,
         model_type,
