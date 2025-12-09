@@ -139,8 +139,24 @@ ZIT_PRESETS = {
     "HALF": ",".join(["1"] + ["0.5"]*30),
 }
 
-# Build flat list for ComfyUI (used when model_type is Auto)
-def build_preset_list(model_type=None):
+# Build lookup dict for preset name -> vector
+def build_preset_lookup():
+    """Build a lookup dictionary from preset name to vector."""
+    lookup = {"None": "", "": ""}
+    for name, vec in SDXL_PRESETS.items():
+        lookup[f"SDXL-{name}"] = vec
+    for name, vec in SD15_PRESETS.items():
+        lookup[f"SD15-{name}"] = vec
+    for name, vec in FLUX_PRESETS.items():
+        lookup[f"FLUX-{name}"] = vec
+    for name, vec in ZIT_PRESETS.items():
+        lookup[f"ZIT-{name}"] = vec
+    return lookup
+
+PRESET_LOOKUP = build_preset_lookup()
+
+# Build flat list for ComfyUI dropdown (just names, no vectors)
+def build_preset_list(model_type=None, include_legacy=False):
     """Build preset list, optionally filtered by model type."""
     # Include empty string for backwards compatibility with cached workflows
     presets = ["None", ""]
@@ -148,30 +164,46 @@ def build_preset_list(model_type=None):
     if model_type is None or model_type == "Auto":
         # Show all presets with prefixes
         for name, vec in SDXL_PRESETS.items():
-            presets.append(f"SDXL-{name}:{vec}")
+            presets.append(f"SDXL-{name}")
+            if include_legacy:
+                presets.append(f"SDXL-{name}:{vec}")
         for name, vec in SD15_PRESETS.items():
-            presets.append(f"SD15-{name}:{vec}")
+            presets.append(f"SD15-{name}")
+            if include_legacy:
+                presets.append(f"SD15-{name}:{vec}")
         for name, vec in FLUX_PRESETS.items():
-            presets.append(f"FLUX-{name}:{vec}")
+            presets.append(f"FLUX-{name}")
+            if include_legacy:
+                presets.append(f"FLUX-{name}:{vec}")
         for name, vec in ZIT_PRESETS.items():
-            presets.append(f"ZIT-{name}:{vec}")
+            presets.append(f"ZIT-{name}")
+            if include_legacy:
+                presets.append(f"ZIT-{name}:{vec}")
     elif model_type == "SDXL":
         for name, vec in SDXL_PRESETS.items():
-            presets.append(f"SDXL-{name}:{vec}")
+            presets.append(f"SDXL-{name}")
+            if include_legacy:
+                presets.append(f"SDXL-{name}:{vec}")
     elif model_type == "SD15":
         for name, vec in SD15_PRESETS.items():
-            presets.append(f"SD15-{name}:{vec}")
+            presets.append(f"SD15-{name}")
+            if include_legacy:
+                presets.append(f"SD15-{name}:{vec}")
     elif model_type == "FLUX":
         for name, vec in FLUX_PRESETS.items():
-            presets.append(f"FLUX-{name}:{vec}")
+            presets.append(f"FLUX-{name}")
+            if include_legacy:
+                presets.append(f"FLUX-{name}:{vec}")
     elif model_type == "ZIT":
         for name, vec in ZIT_PRESETS.items():
-            presets.append(f"ZIT-{name}:{vec}")
+            presets.append(f"ZIT-{name}")
+            if include_legacy:
+                presets.append(f"ZIT-{name}:{vec}")
 
     return presets
 
-# Default preset list (all presets)
-BLOCK_PRESETS = build_preset_list()
+# Default preset list (all presets, include legacy format for backwards compat)
+BLOCK_PRESETS = build_preset_list(include_legacy=True)
 
 # ------------------------------------------------------------------------
 class DonutLoRAStack:
@@ -253,9 +285,14 @@ class DonutLoRAStack:
         block_preset_3 = safe_preset(block_preset_3)
 
         def get_preset_vector(preset):
-            """Extract vector from preset format 'NAME:vector'"""
-            if preset and preset != "None" and ":" in preset:
-                return preset.split(":", 1)[1]
+            """Look up vector from preset name."""
+            if preset and preset != "None" and preset != "":
+                # First try direct lookup
+                if preset in PRESET_LOOKUP:
+                    return PRESET_LOOKUP[preset]
+                # Backwards compatibility: old format with embedded vector "NAME:vector"
+                if ":" in preset:
+                    return preset.split(":", 1)[1]
             return ""
 
         # CivitAI metadata collection
