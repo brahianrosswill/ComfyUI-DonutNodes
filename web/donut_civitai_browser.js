@@ -1160,6 +1160,16 @@ class DonutCivitaiBrowser {
                     switchWidget.value = "On";
                 }
 
+                // Add the new file to widget options if not already present
+                // This ensures the dropdown includes the newly downloaded file
+                if (widget.options?.values && Array.isArray(widget.options.values)) {
+                    if (!widget.options.values.includes(loraFilename)) {
+                        widget.options.values.push(loraFilename);
+                        widget.options.values.sort();
+                        console.log(`[CivitAI Browser] Added ${loraFilename} to widget options`);
+                    }
+                }
+
                 // Set the LoRA name
                 widget.value = loraFilename;
 
@@ -1236,6 +1246,14 @@ class DonutCivitaiBrowser {
                 const switchWidget = node.widgets?.find(w => w.name === `switch_${slot}`);
                 if (switchWidget) {
                     switchWidget.value = "On";
+                }
+
+                // Add the file to widget options if not already present
+                if (widget.options?.values && Array.isArray(widget.options.values)) {
+                    if (!widget.options.values.includes(data.filename)) {
+                        widget.options.values.push(data.filename);
+                        widget.options.values.sort();
+                    }
                 }
 
                 // Set the LoRA
@@ -4216,8 +4234,8 @@ class DonutCivitaiBrowser {
                                 completed = true;
                                 addStatus(`✓ Downloaded ${modelName}, loading to slot ${currentSlot}`, "#66ff66");
 
-                                // Add to local hashes
-                                if (sha256) this.localHashes.add(sha256);
+                                // Add to local hashes (uppercase for consistency)
+                                if (sha256) this.addLocalHash(sha256);
 
                                 // Refresh folder cache so the file appears in dropdowns
                                 await this.refreshFolderCache(model.type);
