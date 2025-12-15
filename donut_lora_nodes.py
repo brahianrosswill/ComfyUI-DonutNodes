@@ -141,69 +141,61 @@ ZIT_PRESETS = {
 
 # Build lookup dict for preset name -> vector
 def build_preset_lookup():
-    """Build a lookup dictionary from preset name to vector."""
+    """Build a lookup dictionary from preset name to vector.
+    Supports both formats for backwards compatibility:
+    - Short: "SDXL-ALL" -> vector
+    - Full:  "SDXL-ALL:1,1,1,..." -> vector
+    """
     lookup = {"None": "", "": ""}
     for name, vec in SDXL_PRESETS.items():
         lookup[f"SDXL-{name}"] = vec
+        lookup[f"SDXL-{name}:{vec}"] = vec
     for name, vec in SD15_PRESETS.items():
         lookup[f"SD15-{name}"] = vec
+        lookup[f"SD15-{name}:{vec}"] = vec
     for name, vec in FLUX_PRESETS.items():
         lookup[f"FLUX-{name}"] = vec
+        lookup[f"FLUX-{name}:{vec}"] = vec
     for name, vec in ZIT_PRESETS.items():
         lookup[f"ZIT-{name}"] = vec
+        lookup[f"ZIT-{name}:{vec}"] = vec
     return lookup
 
 PRESET_LOOKUP = build_preset_lookup()
 
-# Build flat list for ComfyUI dropdown (just names, no vectors)
-def build_preset_list(model_type=None, include_legacy=False):
+# Build flat list for ComfyUI dropdown (show vectors in dropdown)
+def build_preset_list(model_type=None):
     """Build preset list, optionally filtered by model type."""
     # Include empty string for backwards compatibility with cached workflows
     presets = ["None", ""]
 
     if model_type is None or model_type == "Auto":
-        # Show all presets with prefixes
+        # Show all presets with prefixes and vectors
         for name, vec in SDXL_PRESETS.items():
-            presets.append(f"SDXL-{name}")
-            if include_legacy:
-                presets.append(f"SDXL-{name}:{vec}")
+            presets.append(f"SDXL-{name}:{vec}")
         for name, vec in SD15_PRESETS.items():
-            presets.append(f"SD15-{name}")
-            if include_legacy:
-                presets.append(f"SD15-{name}:{vec}")
+            presets.append(f"SD15-{name}:{vec}")
         for name, vec in FLUX_PRESETS.items():
-            presets.append(f"FLUX-{name}")
-            if include_legacy:
-                presets.append(f"FLUX-{name}:{vec}")
+            presets.append(f"FLUX-{name}:{vec}")
         for name, vec in ZIT_PRESETS.items():
-            presets.append(f"ZIT-{name}")
-            if include_legacy:
-                presets.append(f"ZIT-{name}:{vec}")
+            presets.append(f"ZIT-{name}:{vec}")
     elif model_type == "SDXL":
         for name, vec in SDXL_PRESETS.items():
-            presets.append(f"SDXL-{name}")
-            if include_legacy:
-                presets.append(f"SDXL-{name}:{vec}")
+            presets.append(f"SDXL-{name}:{vec}")
     elif model_type == "SD15":
         for name, vec in SD15_PRESETS.items():
-            presets.append(f"SD15-{name}")
-            if include_legacy:
-                presets.append(f"SD15-{name}:{vec}")
+            presets.append(f"SD15-{name}:{vec}")
     elif model_type == "FLUX":
         for name, vec in FLUX_PRESETS.items():
-            presets.append(f"FLUX-{name}")
-            if include_legacy:
-                presets.append(f"FLUX-{name}:{vec}")
+            presets.append(f"FLUX-{name}:{vec}")
     elif model_type == "ZIT":
         for name, vec in ZIT_PRESETS.items():
-            presets.append(f"ZIT-{name}")
-            if include_legacy:
-                presets.append(f"ZIT-{name}:{vec}")
+            presets.append(f"ZIT-{name}:{vec}")
 
     return presets
 
-# Default preset list (all presets, include legacy format for backwards compat)
-BLOCK_PRESETS = build_preset_list(include_legacy=True)
+# Default preset list (all presets with vectors shown)
+BLOCK_PRESETS = build_preset_list()
 
 # ------------------------------------------------------------------------
 class DonutLoRAStack:
