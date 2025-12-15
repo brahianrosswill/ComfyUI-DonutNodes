@@ -4151,13 +4151,13 @@ class DonutCivitaiBrowser {
                 const sha256 = file.hashes?.SHA256;
                 if (sha256 && this.localHashes.has(sha256)) {
                     addStatus(`✓ ${modelName} already downloaded, loading to slot ${currentSlot}`, "#66ff66");
-                    // Load directly
-                    this.loadLoraToSlot({
+                    // Load directly using hash lookup
+                    await this.loadDownloadedToSlot(sha256, currentSlot, modelName, {
                         url: version.downloadUrl,
                         filename: file.name,
-                        sha256: sha256,
+                        modelType: model.type,
                         baseModel: version.baseModel
-                    }, currentSlot);
+                    });
                     currentSlot++;
                     continue;
                 }
@@ -4219,13 +4219,13 @@ class DonutCivitaiBrowser {
                                 // Add to local hashes
                                 if (sha256) this.localHashes.add(sha256);
 
-                                // Load to slot
-                                this.loadLoraToSlot({
-                                    url: version.downloadUrl,
-                                    filename: file.name,
-                                    sha256: sha256,
-                                    baseModel: version.baseModel
-                                }, currentSlot);
+                                // Refresh folder cache so the file appears in dropdowns
+                                await this.refreshFolderCache(model.type);
+
+                                // Load to slot using the filepath from download status
+                                if (progress.filepath && this.targetNode) {
+                                    await this.loadToNodeSlot(this.targetNode, currentSlot, progress.filepath);
+                                }
                                 currentSlot++;
                             } else if (progress.status === "failed" || progress.status === "error") {
                                 addStatus(`✗ Download failed: ${progress.error || "Unknown error"}`, "#ff6666");
